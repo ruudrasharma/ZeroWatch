@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import init_db
-from routers import dashboard, detection_runs, evaluations, scans
+from routers import dashboard, detection_runs, evaluations, scans, settings
 from services.model_loader import load_all_models
 
 # ─── Load env ────────────────────────────────────────────────────────────────
@@ -53,6 +53,7 @@ app.include_router(scans.router, prefix="/api")
 app.include_router(detection_runs.router, prefix="/api")
 app.include_router(evaluations.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
+app.include_router(settings.router, prefix="/api")
 
 
 # ─── Startup ─────────────────────────────────────────────────────────────────
@@ -61,8 +62,9 @@ async def startup_event() -> None:
     """Initialize DB and pre-load ML models on startup."""
     init_db()
     load_all_models()
-    from services.seed import seed_model_evaluations
+    from services.seed import seed_demo_history, seed_model_evaluations
     seed_model_evaluations()
+    seed_demo_history()
 
 
 @app.get("/", include_in_schema=False)

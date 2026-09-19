@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
 NVD_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-NVD_API_KEY: Optional[str] = os.getenv("NVD_API_KEY") or None
+NVD_API_KEY: str | None = os.getenv("NVD_API_KEY") or None
 NVD_RATE_LIMIT: int = int(os.getenv("NVD_RATE_LIMIT", "5"))
 NVD_RATE_WINDOW: float = float(os.getenv("NVD_RATE_WINDOW_SECONDS", "30"))
 
@@ -43,25 +43,25 @@ def _cvss_to_severity(score: float) -> str:
         return "low"
 
 
-async def lookup_cves_for_tech(name: str, version: Optional[str]) -> List[Dict[str, Any]]:
+async def lookup_cves_for_tech(name: str, version: str | None) -> list[dict[str, Any]]:
     """
     Query NVD CVE API v2 for a single technology name + version.
 
     Returns a list of finding dicts (category='cve').
     """
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
 
     # Build keyword query
     keyword = name
     if version and version != "unknown":
         keyword = f"{name} {version}"
 
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "keywordSearch": keyword,
         "resultsPerPage": 5,
         "startIndex": 0,
     }
-    headers: Dict[str, str] = {"Accept": "application/json"}
+    headers: dict[str, str] = {"Accept": "application/json"}
     if NVD_API_KEY:
         headers["apiKey"] = NVD_API_KEY
 
@@ -98,7 +98,7 @@ async def lookup_cves_for_tech(name: str, version: Optional[str]) -> List[Dict[s
 
         # Extract CVSS score (prefer v3.1, fall back to v3.0, then v2)
         metrics = cve.get("metrics", {})
-        cvss_score: Optional[float] = None
+        cvss_score: float | None = None
         for metric_key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
             if metric_key in metrics:
                 metric_data = metrics[metric_key]
@@ -127,7 +127,7 @@ async def lookup_cves_for_tech(name: str, version: Optional[str]) -> List[Dict[s
     return findings
 
 
-async def lookup_cves(tech_list: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+async def lookup_cves(tech_list: list[dict[str, str]]) -> list[dict[str, Any]]:
     """
     Run CVE lookups for all fingerprinted technologies concurrently.
     Returns combined finding list.
@@ -138,7 +138,7 @@ async def lookup_cves(tech_list: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         if t.get("name")
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     for r in results:
         if isinstance(r, list):
             findings.extend(r)

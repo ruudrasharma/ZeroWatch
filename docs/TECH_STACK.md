@@ -6,15 +6,16 @@ Exact versions are pinned at project start and updated here as they change — k
 
 | Component | Choice | Version (baseline) |
 |---|---|---|
-| Framework | Next.js (App Router) | 14.x |
+| Framework | Next.js (App Router) | 14.2.x (latest patch on the 14 line — kept per this doc's 14.x pin; `npm audit`'s remaining advisories concern internet-exposed deployments — SSRF via rewrites, cache poisoning, Image Optimization API — none of which apply to this localhost-only tool per SECURITY.md's threat model) |
 | Language | TypeScript | 5.x |
-| Styling | Tailwind CSS | 3.x |
-| Component library | shadcn/ui | latest |
-| Charts | Recharts | 2.x |
+| Styling | Tailwind CSS | **4.x** — bumped from the original 3.x pin: shadcn's current CLI scaffolds Tailwind v4 CSS-first config (`@theme`, `@custom-variant`) regardless of the installed major version, so a v3 install left most shadcn utility classes resolving to nothing; migrating to v4 was less risk than hand-maintaining a v3/v4 hybrid. See CHANGELOG.md [0.3.0]. |
+| Component library | shadcn/ui | latest (radix style — the CLI's newer `base-nova`/`@base-ui/react` default was swapped for the more battle-tested Radix-backed style, since this build leans on deep custom theming) |
+| Charts | Recharts | **3.x** — latest was 3.x at build time, not 2.x |
 | State/data fetching | React Query (TanStack Query) | 5.x |
-| WebSocket client | native `WebSocket` API, wrapped in a custom hook | — |
-| Package manager | npm | 10.x |
-| Node runtime | Node.js | 18.x LTS or 20.x LTS |
+| Animation | Framer Motion | latest — additive per the build brief's quality bar, not a TECH_STACK deviation |
+| WebSocket client | native `WebSocket` API, wrapped in a custom hook (`useDetectionStream`) | — |
+| Package manager | npm | 10.x+ (Node 24 on the build machine ships npm 11) |
+| Node runtime | Node.js | 18.x LTS or 20.x LTS (20-slim used in `frontend/Dockerfile`) |
 
 ## Backend
 
@@ -35,12 +36,13 @@ Exact versions are pinned at project start and updated here as they change — k
 
 | Component | Choice | Notes |
 |---|---|---|
-| Deep learning | PyTorch | 2.x — Autoencoder implementation |
-| Classical ML | scikit-learn | 1.x — Isolation Forest, Random Forest baseline |
-| Explainability | SHAP | latest |
+| Deep learning | PyTorch | 2.6.x — Autoencoder implementation (bumped from 2.4.1; no wheels for Python 3.13, see CHANGELOG.md [0.2.1]) |
+| Classical ML | scikit-learn | 1.6.x — Isolation Forest, Random Forest baseline (bumped from 1.5.2, same reason) |
+| Model persistence | joblib | required, not optional — checkpoints (`scaler.pkl`, `label_encoders.pkl`, `random_forest_baseline.pkl`) are joblib-native format; loading with plain `pickle.load()` corrupts on the out-of-band numpy array encoding |
+| Explainability | SHAP | 0.47.x |
 | Imbalance handling | imbalanced-learn (SMOTE) | latest |
-| Data handling | pandas, NumPy | latest stable |
-| Dataset | CICIDS2017 / CSE-CIC-IDS2018 | pre-extracted flow features |
+| Data handling | pandas, NumPy | pandas 2.2.x, NumPy 2.1.x (bumped from 1.26.4, same Python 3.13 reason) |
+| Dataset | NSL-KDD (training notebook) — CICIDS2017/2018 documented as a drop-in swap, not yet done | pre-extracted flow features |
 
 ## Local LLM
 

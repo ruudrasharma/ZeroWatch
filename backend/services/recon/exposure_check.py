@@ -14,13 +14,13 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 
 # Curated list of sensitive paths per FEATURES.md
-SENSITIVE_PATHS: List[str] = [
+SENSITIVE_PATHS: list[str] = [
     "/.env",
     "/.env.local",
     "/.env.production",
@@ -73,7 +73,7 @@ INFORMATIONAL_PATHS = {"/robots.txt", "/sitemap.xml"}
 _CONCURRENCY = 5
 
 
-async def _check_path(client: httpx.AsyncClient, base_url: str, path: str) -> Dict[str, Any] | None:
+async def _check_path(client: httpx.AsyncClient, base_url: str, path: str) -> dict[str, Any] | None:
     """Check a single path. Returns a finding dict or None if not exposed."""
     url = urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
     try:
@@ -107,14 +107,14 @@ async def _check_path(client: httpx.AsyncClient, base_url: str, path: str) -> Di
     return None
 
 
-async def check_exposed_paths(url: str) -> List[Dict[str, Any]]:
+async def check_exposed_paths(url: str) -> list[dict[str, Any]]:
     """
     Check the curated sensitive path list against the target.
 
     Returns a list of finding dicts for any exposed paths.
     If nothing is exposed, returns a single informational all-clear.
     """
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     semaphore = asyncio.Semaphore(_CONCURRENCY)
 
     async def bounded_check(client, path):

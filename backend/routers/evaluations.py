@@ -12,8 +12,6 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 
 from __future__ import annotations
 
-from typing import List
-
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -24,8 +22,8 @@ from schemas import EvaluationOut
 router = APIRouter(tags=["Evaluation"])
 
 
-@router.get("/evaluations", response_model=List[EvaluationOut])
-def get_evaluations(db: Session = Depends(get_db)) -> List[EvaluationOut]:
+@router.get("/evaluations", response_model=list[EvaluationOut])
+def get_evaluations(db: Session = Depends(get_db)) -> list[EvaluationOut]:
     """
     Returns leave-one-attack-out evaluation results across all models/categories.
     Seed data from zerowatch_models/leave_one_out_results.csv is loaded at startup

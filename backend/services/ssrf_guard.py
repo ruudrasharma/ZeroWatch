@@ -18,7 +18,6 @@ import os
 import socket
 from urllib.parse import urlparse
 
-
 ALLOW_LOCALHOST: bool = os.getenv("ALLOW_LOCALHOST_SCAN_TARGETS", "false").lower() == "true"
 
 # RFC 1918 + loopback + link-local + CGNAT private ranges

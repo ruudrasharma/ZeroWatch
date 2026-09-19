@@ -19,18 +19,18 @@ from __future__ import annotations
 
 import socket
 import ssl
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urlparse
 
 
-def _get_cert_info(hostname: str, port: int = 443) -> Dict[str, Any]:
+def _get_cert_info(hostname: str, port: int = 443) -> dict[str, Any]:
     """Establish a TLS connection and extract certificate details."""
     ctx = ssl.create_default_context()
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
 
-    raw_info: Dict[str, Any] = {}
+    raw_info: dict[str, Any] = {}
     try:
         with socket.create_connection((hostname, port), timeout=10) as sock:
             with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
@@ -45,7 +45,7 @@ def _get_cert_info(hostname: str, port: int = 443) -> Dict[str, Any]:
         raw_info["cert"] = None
         raw_info["protocol"] = None
         raw_info["cipher"] = None
-    except (socket.timeout, ConnectionRefusedError, OSError) as exc:
+    except (TimeoutError, ConnectionRefusedError, OSError) as exc:
         raw_info["connection_error"] = str(exc)
         raw_info["cert"] = None
         raw_info["protocol"] = None
@@ -57,10 +57,10 @@ def _get_cert_info(hostname: str, port: int = 443) -> Dict[str, Any]:
 
 def _parse_ssl_date(date_str: str) -> datetime:
     """Parse SSL certificate date string (format: 'Jan  1 12:00:00 2026 GMT')."""
-    return datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+    return datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=UTC)
 
 
-def check_ssl(url: str) -> List[Dict[str, Any]]:
+def check_ssl(url: str) -> list[dict[str, Any]]:
     """
     Run SSL/TLS checks against the target URL.
 
@@ -85,7 +85,7 @@ def check_ssl(url: str) -> List[Dict[str, Any]]:
 
     hostname = parsed.hostname or ""
     port = parsed.port or 443
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
 
     info = _get_cert_info(hostname, port)
 
@@ -123,7 +123,7 @@ def check_ssl(url: str) -> List[Dict[str, Any]]:
     # ── Expiry check ──────────────────────────────────────────────────────────
     not_after_str = cert.get("notAfter", "")
     not_before_str = cert.get("notBefore", "")
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
 
     if not_after_str:
         try:
@@ -189,7 +189,7 @@ def check_ssl(url: str) -> List[Dict[str, Any]]:
     # ── Cipher suite ─────────────────────────────────────────────────────────
     cipher = info.get("cipher")
     if cipher:
-        cipher_name = cipher[0] if isinstance(cipher, (tuple, list)) else str(cipher)
+        cipher_name = cipher[0] if isinstance(cipher, tuple | list) else str(cipher)
         weak_keywords = ("RC4", "DES", "EXPORT", "NULL", "MD5", "ANON")
         if any(k in cipher_name.upper() for k in weak_keywords):
             findings.append(

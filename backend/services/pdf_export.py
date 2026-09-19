@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import io
 import logging
-from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -172,15 +171,15 @@ async def _generate_with_reportlab(scan: Any) -> bytes:
 def _minimal_pdf_fallback(scan: Any) -> bytes:
     """Minimal raw PDF bytes if no PDF library is available."""
     content = (
-        f"%PDF-1.4\n"
-        f"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-        f"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
-        f"3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R"
-        f"/Contents 4 0 R>>endobj\n"
-        f"4 0 obj<</Length 44>>\nstream\n"
-        f"BT /F1 12 Tf 100 700 Td (ZeroWatch Report) Tj ET\n"
-        f"endstream\nendobj\n"
-        f"xref\n0 5\n0000000000 65535 f\n"
-        f"trailer<</Size 5/Root 1 0 R>>\n%%EOF\n"
-    ).encode()
+        b"%PDF-1.4\n"
+        b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        b"3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R"
+        b"/Contents 4 0 R>>endobj\n"
+        b"4 0 obj<</Length 44>>\nstream\n"
+        b"BT /F1 12 Tf 100 700 Td (ZeroWatch Report) Tj ET\n"
+        b"endstream\nendobj\n"
+        b"xref\n0 5\n0000000000 65535 f\n"
+        b"trailer<</Size 5/Root 1 0 R>>\n%%EOF\n"
+    )
     return content

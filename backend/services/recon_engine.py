@@ -24,7 +24,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -43,6 +43,24 @@ from services.ssrf_guard import check_ssrf_guard
 logger = logging.getLogger(__name__)
 
 _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# ─── In-memory scan progress tracker ───────────────────────────────────────────
+# scan.status in the DB is intentionally coarse (pending/running/completed/failed —
+# what History/Dashboard filter and display on). The GET /api/scans/{id}/stream SSE
+# endpoint in routers/scans.py needs the finer-grained steps API_SPEC.md documents
+# (checking_ssl, fingerprinting, checking_cves, checking_exposure, generating_report)
+# for the animated ProgressStepper (UI_UX_SPEC.md §3.3). Tracked here in-process
+# rather than in the DB since it's transient, single-process, per-scan UI state —
+# not something History needs to persist or query.
+_scan_progress: dict[int, str] = {}
+
+
+def get_scan_progress(scan_id: int) -> str | None:
+    return _scan_progress.get(scan_id)
+
+
+def _set_scan_progress(scan_id: int, step: str) -> None:
+    _scan_progress[scan_id] = step
 
 
 def _get_db() -> Session:
@@ -80,7 +98,7 @@ async def run_scan(scan_id: int, url: str) -> None:
             db.add(
                 Finding(
                     scan_id=scan_id,
-                    category="ssl",
+                    category="security",
                     severity="critical",
                     title="Scan blocked by SSRF guard",
                     description=str(exc),
@@ -89,14 +107,16 @@ async def run_scan(scan_id: int, url: str) -> None:
             )
             scan.completed_at = datetime.utcnow()
             db.commit()
+            _set_scan_progress(scan_id, "failed")
             return
 
         scan.status = "running"
         db.commit()
 
-        all_findings: List[Dict[str, Any]] = []
+        all_findings: list[dict[str, Any]] = []
 
         # ── 2. Parallel checks ────────────────────────────────────────────────
+        _set_scan_progress(scan_id, "checking_ssl")
         ssl_task = asyncio.create_task(_safe(check_ssl, url))
         headers_task = asyncio.create_task(_safe(check_headers, url))
         cookies_task = asyncio.create_task(_safe(check_cookies, url))
@@ -113,13 +133,16 @@ async def run_scan(scan_id: int, url: str) -> None:
         # fp_result is a tuple: (findings, tech_list)
         fp_findings, tech_list = fp_result if isinstance(fp_result, tuple) else (fp_result, [])
         all_findings.extend(fp_findings)
+        _set_scan_progress(scan_id, "fingerprinting")
 
         # ── 3. CVE lookup ────────────────────────────────────────────────────
+        _set_scan_progress(scan_id, "checking_cves")
         if tech_list:
             cve_findings = await _safe(lookup_cves, tech_list)
             all_findings.extend(cve_findings)
 
         # ── 4. Exposed paths ─────────────────────────────────────────────────
+        _set_scan_progress(scan_id, "checking_exposure")
         exposure_findings = await _safe(check_exposed_paths, url)
         all_findings.extend(exposure_findings)
 
@@ -131,6 +154,7 @@ async def run_scan(scan_id: int, url: str) -> None:
         risk_score = compute_risk_score(all_findings)
 
         # ── 7. AI remediation per finding (Ollama) ────────────────────────────
+        _set_scan_progress(scan_id, "generating_report")
         remediation_tasks = [
             generate_finding_remediation(f)
             for f in all_findings
@@ -158,6 +182,7 @@ async def run_scan(scan_id: int, url: str) -> None:
         scan.status = "completed"
         scan.completed_at = datetime.utcnow()
         db.commit()
+        _set_scan_progress(scan_id, "completed")
         logger.info("Scan %d completed — risk_score=%d, findings=%d", scan_id, risk_score, len(all_findings))
 
     except Exception as exc:  # noqa: BLE001
@@ -170,8 +195,13 @@ async def run_scan(scan_id: int, url: str) -> None:
                 db.commit()
         except Exception:
             pass
+        _set_scan_progress(scan_id, "failed")
     finally:
         db.close()
+        # Drop the transient tracker entry once the SSE consumer has had a
+        # chance to observe the terminal state — the stream endpoint polls DB
+        # status as the source of truth for completed/failed anyway.
+        _scan_progress.pop(scan_id, None)
 
 
 async def _safe(fn, *args, **kwargs):

@@ -21,12 +21,12 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import httpx
 
 # (header_name, severity_if_missing, description_if_missing)
-REQUIRED_HEADERS: List[Tuple[str, str, str]] = [
+REQUIRED_HEADERS: list[tuple[str, str, str]] = [
     (
         "Content-Security-Policy",
         "high",
@@ -66,13 +66,13 @@ REQUIRED_HEADERS: List[Tuple[str, str, str]] = [
 ]
 
 
-async def check_headers(url: str) -> List[Dict[str, Any]]:
+async def check_headers(url: str) -> list[dict[str, Any]]:
     """
     Fetch the target URL (HEAD first, fall back to GET) and audit response headers.
 
     Returns a list of finding dicts.
     """
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
 
     try:
         async with httpx.AsyncClient(

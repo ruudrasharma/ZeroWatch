@@ -15,15 +15,13 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup
-
 
 # ─── Detection rules: (name, pattern, version_group_index, source) ───────────
 #  source: "header:<header-name>" | "body" | "meta"
-_RULES: List[Tuple[str, str, int, str]] = [
+_RULES: list[tuple[str, str, int, str]] = [
     # Frameworks / servers detected via headers
     ("nginx", r"nginx(?:/(\d+\.\d+[\.\d]*))? ?", 1, "header:server"),
     ("apache", r"apache(?:/(\d+\.\d+[\.\d]*))?", 1, "header:server"),
@@ -55,7 +53,7 @@ _RULES: List[Tuple[str, str, int, str]] = [
 ]
 
 
-async def fingerprint_tech(url: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+async def fingerprint_tech(url: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """
     Detect technologies and versions from the target URL.
 
@@ -63,8 +61,8 @@ async def fingerprint_tech(url: str) -> Tuple[List[Dict[str, Any]], List[Dict[st
         findings: list of finding dicts (category='cve' placeholder, one per detected tech)
         tech_list: list of {"name": str, "version": str|None} for CVE lookup
     """
-    findings: List[Dict[str, Any]] = []
-    detected: Dict[str, Optional[str]] = {}  # name → version (deduplicated)
+    findings: list[dict[str, Any]] = []
+    detected: dict[str, str | None] = {}  # name → version (deduplicated)
 
     try:
         async with httpx.AsyncClient(
@@ -102,7 +100,7 @@ async def fingerprint_tech(url: str) -> Tuple[List[Dict[str, Any]], List[Dict[st
 
         m = re.search(pattern, text_to_search, re.IGNORECASE)
         if m:
-            version: Optional[str] = None
+            version: str | None = None
             if ver_group > 0:
                 try:
                     version = m.group(ver_group) or None
@@ -113,7 +111,7 @@ async def fingerprint_tech(url: str) -> Tuple[List[Dict[str, Any]], List[Dict[st
                 detected[tech_name] = version
 
     # Build tech list for CVE lookup and informational findings
-    tech_list: List[Dict[str, str]] = []
+    tech_list: list[dict[str, str]] = []
     for name, version in detected.items():
         tech_list.append({"name": name, "version": version or "unknown"})
         findings.append(

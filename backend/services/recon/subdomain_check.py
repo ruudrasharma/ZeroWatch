@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import Any, Dict, List, Set
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -41,17 +41,17 @@ def _resolve_hostname(hostname: str) -> bool:
     try:
         socket.getaddrinfo(hostname, None, timeout=3)
         return True
-    except (socket.gaierror, socket.timeout, OSError):
+    except (TimeoutError, socket.gaierror, OSError):
         return False
 
 
-async def check_subdomains(url: str) -> List[Dict[str, Any]]:
+async def check_subdomains(url: str) -> list[dict[str, Any]]:
     """
     Enumerate subdomains via crt.sh and flag those that resolve.
 
     Returns a list of finding dicts.
     """
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     domain = _extract_domain(url)
 
     try:
@@ -74,7 +74,7 @@ async def check_subdomains(url: str) -> List[Dict[str, Any]]:
         ]
 
     # Deduplicate subdomains from crt.sh results
-    subdomains: Set[str] = set()
+    subdomains: set[str] = set()
     for entry in data:
         name = entry.get("name_value", "")
         for sub in name.splitlines():

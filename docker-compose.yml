@@ -1,0 +1,55 @@
+# ZeroWatch — one-command local run, per DEPLOYMENT.md §2.
+#
+# First time:
+#   cp backend/.env.example backend/.env        # fill in VIRUSTOTAL_API_KEY at minimum
+#   cp frontend/.env.local.example frontend/.env.local
+#   docker compose up --build
+#   docker exec -it $(docker compose ps -q ollama) ollama pull llama3.1:8b
+#
+# Then open http://localhost:3000. Fully offline after the model pull.
+
+services:
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    ports: ["11434:11434"]
+    volumes: ["ollama_data:/root/.ollama"]
+
+  backend:
+    build: ./backend
+    ports: ["8000:8000"]
+    env_file: ./backend/.env
+    environment:
+      # Overrides the .env value for container-to-container networking —
+      # "localhost" inside this container would mean the backend container
+      # itself, not the ollama service.
+      OLLAMA_BASE_URL: http://ollama:11434
+      DATABASE_URL: sqlite:////app/data/zerowatch.db
+      FRONTEND_ORIGIN: http://localhost:3000
+    depends_on:
+      - ollama
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/models/checkpoints:/app/models/checkpoints
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/dashboard/summary')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Browser-facing URLs — the browser runs on the host, not inside the
+        # compose network, so these stay pointed at the published host ports
+        # (baked in at build time since they're NEXT_PUBLIC_* vars).
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api
+        NEXT_PUBLIC_WS_BASE_URL: ws://localhost:8000/api
+    ports: ["3000:3000"]
+    depends_on:
+      - backend
+
+volumes:
+  ollama_data:

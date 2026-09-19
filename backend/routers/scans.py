@@ -19,17 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from database import Finding, Scan
-from deps import get_db
+from deps import SessionLocal, get_db
 from schemas import (
-    ErrorDetail,
     ErrorResponse,
     FindingOut,
     ScanCreatedResponse,
@@ -38,6 +35,7 @@ from schemas import (
     ScanRequest,
 )
 from services import recon_engine
+from services.recon_engine import get_scan_progress
 
 router = APIRouter(tags=["Recon Engine"])
 
@@ -110,12 +108,31 @@ async def start_scan(
 def list_scans(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    min_severity: Optional[str] = Query(None),
+    min_severity: str | None = Query(None),
     db: Session = Depends(get_db),
 ) -> list[ScanListItem]:
     """List scan history. Supports limit/offset/min_severity query params."""
-    query = db.query(Scan).order_by(Scan.started_at.desc())
-    scans = query.offset(offset).limit(limit).all()
+    query = db.query(Scan)
+
+    if min_severity:
+        # Ordering matches the risk weighting in services/scoring.py — a scan
+        # matches if ANY of its findings is at or above the requested severity.
+        severity_order = ["low", "medium", "high", "critical"]
+        normalized = min_severity.lower()
+        if normalized not in severity_order:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "code": "invalid_request",
+                        "message": f"min_severity must be one of {severity_order}",
+                    }
+                },
+            )
+        qualifying = severity_order[severity_order.index(normalized):]
+        query = query.join(Finding).filter(Finding.severity.in_(qualifying)).distinct()
+
+    scans = query.order_by(Scan.started_at.desc()).offset(offset).limit(limit).all()
     return [
         ScanListItem(
             scan_id=s.id,
@@ -166,31 +183,39 @@ async def stream_scan_progress(
         raise HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": "not found"}})
 
     async def event_generator():
-        steps = [
-            "checking_ssl",
-            "fingerprinting",
-            "checking_cves",
-            "checking_exposure",
-            "generating_report",
-            "completed",
-        ]
-        last_status = None
+        # Step names per API_SPEC.md, driving the animated ProgressStepper
+        # (UI_UX_SPEC.md §3.3). recon_engine tracks these in-memory per scan_id
+        # (see services/recon_engine.get_scan_progress) since they're finer-
+        # grained than the DB's pending/running/completed/failed status.
+        #
+        # Each poll opens its OWN short-lived session rather than reusing the
+        # request-scoped one across the whole sleep loop: SQLite connections
+        # can pin a read snapshot from the moment their transaction opens, so a
+        # single long-lived session polling in a loop never observed writes
+        # committed by run_scan's separate background-task session — the
+        # stream would hang on "running" forever and never see "completed".
+        last_step = None
         poll_count = 0
         while True:
-            # Re-query in each iteration (fresh DB state)
-            fresh_scan = db.query(Scan).filter(Scan.id == scan_id).first()
+            poll_db = SessionLocal()
+            try:
+                fresh_scan = poll_db.query(Scan).filter(Scan.id == scan_id).first()
+            finally:
+                poll_db.close()
             if not fresh_scan:
                 break
-            current_status = fresh_scan.status
+            db_status = fresh_scan.status
 
-            if current_status in ("completed", "failed"):
-                yield f"data: {json.dumps({'step': current_status})}\n\n"
+            if db_status in ("completed", "failed"):
+                if db_status != last_step:
+                    yield f"data: {json.dumps({'step': db_status})}\n\n"
                 break
 
-            # Emit current status if it changed
-            if current_status != last_status:
-                yield f"data: {json.dumps({'step': current_status})}\n\n"
-                last_status = current_status
+            current_step = get_scan_progress(scan_id) or db_status
+
+            if current_step != last_step:
+                yield f"data: {json.dumps({'step': current_step})}\n\n"
+                last_step = current_step
 
             poll_count += 1
             if poll_count > 120:  # 60s timeout
