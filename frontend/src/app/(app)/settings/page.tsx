@@ -81,7 +81,7 @@ export default function SettingsPage() {
             <WifiOff className="size-4 shrink-0" />
             Ollama isn&apos;t reachable at {settings?.ollama_base_url ?? "localhost:11434"}.
             Report/remediation text falls back to labeled placeholder copy until
-            it&apos;s running (<code className="font-mono">ollama serve</code>).
+            it&apos;s running (<code className="whitespace-nowrap font-mono">ollama serve</code>).
           </div>
         ) : (
           <div className="space-y-1.5">
