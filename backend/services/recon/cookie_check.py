@@ -16,11 +16,10 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-
 
 # Heuristic: cookie names suggesting session tokens
 SESSION_PATTERNS = re.compile(
@@ -29,10 +28,10 @@ SESSION_PATTERNS = re.compile(
 )
 
 
-def _parse_set_cookie(header_value: str) -> Dict[str, Any]:
+def _parse_set_cookie(header_value: str) -> dict[str, Any]:
     """Parse a single Set-Cookie header into a dict of flags/attributes."""
     parts = [p.strip() for p in header_value.split(";")]
-    cookie: Dict[str, Any] = {"raw": header_value}
+    cookie: dict[str, Any] = {"raw": header_value}
 
     # First part is name=value
     if parts:
@@ -49,13 +48,13 @@ def _parse_set_cookie(header_value: str) -> Dict[str, Any]:
     return cookie
 
 
-async def check_cookies(url: str) -> List[Dict[str, Any]]:
+async def check_cookies(url: str) -> list[dict[str, Any]]:
     """
     Fetch the target URL and audit Set-Cookie headers.
 
     Returns a list of finding dicts.
     """
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     parsed = urlparse(url)
     is_https = parsed.scheme == "https"
 

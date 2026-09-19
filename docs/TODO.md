@@ -4,46 +4,65 @@ Living list of remaining work, tracked against the build order from PRD.md/prior
 
 ## Phase 1 — Data & ML foundation
 - [x] Colab training notebook built: `ml/notebooks/ZeroWatch_Model_Training.ipynb` — loads NSL-KDD, preprocesses, runs leave-one-attack-out split, trains Autoencoder + Isolation Forest + Random Forest baseline, evaluates, runs SHAP, saves checkpoints
-- [ ] Run the notebook end-to-end in Colab and record the real (not placeholder) precision/recall/F1/FPR numbers into `DATABASE_SCHEMA.md`'s `model_evaluations` table and the Evaluation page mock data
+- [x] Convert the notebook's training logic into `ml/scripts/*.py` for automated/reproducible re-runs outside Colab — `python -m ml.scripts.train`, see `ml/README.md`
+- [x] Run the pipeline end-to-end and record the real (not placeholder)
+      precision/recall/F1/FPR numbers — `backend/models/checkpoints/` holds
+      the real output; `services/seed.py` reads that CSV directly (not a
+      copy-pasted table) so `model_evaluations` and the Evaluation page
+      always match whatever checkpoints are actually loaded
+- [x] Copy trained checkpoints into `backend/models/checkpoints/` — `ml/scripts/train.py --output-dir backend/models/checkpoints` does this directly, no manual zip/copy step
 - [ ] (Optional) Swap dataset loader to CICIDS2017/2018 per `ml/README.md` notes, re-run, compare results
-- [ ] Convert the notebook's training logic into `ml/scripts/*.py` for automated/reproducible re-runs outside Colab
-- [ ] Copy downloaded `zerowatch_models.zip` contents into `backend/models/checkpoints/`
 
 ## Phase 2 — Backend
-- [ ] FastAPI project skeleton (routers, DB models, Pydantic schemas)
-- [ ] SQLite schema migration (per DATABASE_SCHEMA.md)
-- [ ] Recon Engine: SSL/TLS check module
-- [ ] Recon Engine: security header audit module
-- [ ] Recon Engine: cookie security check module
-- [ ] Recon Engine: tech fingerprinting module
-- [ ] Recon Engine: NVD CVE lookup integration
-- [ ] Recon Engine: exposed path checker
-- [ ] Recon Engine: crt.sh subdomain check
-- [ ] Risk scoring function
-- [ ] Ollama integration (report generation service)
-- [ ] WebSocket endpoint for anomaly live feed
-- [ ] Dataset replay engine (paced streaming from processed flow data)
-- [ ] PDF export (WeasyPrint/reportlab template)
+- [x] FastAPI project skeleton (routers, DB models, Pydantic schemas)
+- [x] SQLite schema migration (per DATABASE_SCHEMA.md)
+- [x] Recon Engine: SSL/TLS check module
+- [x] Recon Engine: security header audit module
+- [x] Recon Engine: cookie security check module
+- [x] Recon Engine: tech fingerprinting module
+- [x] Recon Engine: NVD CVE lookup integration
+- [x] Recon Engine: exposed path checker
+- [x] Recon Engine: crt.sh subdomain check
+- [x] Risk scoring function
+- [x] Ollama integration (report generation service)
+- [x] WebSocket endpoint for anomaly live feed
+- [x] Dataset replay engine (paced streaming from processed flow data; falls
+      back to a believable synthetic score distribution when no processed
+      CICIDS/NSL-KDD data is present in data/processed/)
+- [x] PDF export (reportlab template)
+- [x] Backend audit pass (Phase A) — installability + correctness fixes, see
+      CHANGELOG.md [0.2.1] for the full list
 
 ## Phase 3 — Frontend
-- [ ] Next.js project skeleton, design tokens from UI_UX_SPEC.md set up in Tailwind config
-- [ ] Landing page
-- [ ] Dashboard page + summary cards
-- [ ] Recon scan page + progress stepper
-- [ ] Recon results page (risk gauge, findings list)
-- [ ] Anomaly live dashboard (traffic feed, score chart, alerts panel)
-- [ ] Alert detail view (SHAP chart)
-- [ ] Evaluation page (results table, confusion matrix, comparison chart)
-- [ ] History page
-- [ ] Settings page
-- [ ] Dark/light theme toggle
-- [ ] Responsive layout pass (mobile/tablet breakpoints)
+- [x] Next.js 14 (App Router) + TypeScript + Tailwind v4 + shadcn/ui (radix
+      style) + Recharts + TanStack Query + Framer Motion scaffold; design
+      tokens from UI_UX_SPEC.md §2 in `globals.css` (dark default, `.light`
+      inversion, Inter/JetBrains Mono via next/font)
+- [x] Landing page — animated hero, live counter strip from
+      `GET /api/dashboard/summary`, skippable animated boot sequence
+- [x] Dashboard page + 3 animated summary cards + recent activity feed + 2 launch cards
+- [x] Recon scan page + 5-step animated progress stepper (SSE-driven)
+- [x] Recon results page (animated risk gauge, collapsible severity-coded finding cards, PDF export)
+- [x] Anomaly live dashboard (control bar, live traffic table, real-time score
+      chart with threshold line, flagged-alerts panel, all WS-driven)
+- [x] Alert detail slide-over (SHAP bar chart, confidence, signature-match vs AI-verdict)
+- [x] Evaluation page (results table, per-category metrics heatmap, animated model-comparison chart)
+- [x] History page (filterable/sortable, row click reuses Recon results / Anomaly detail views)
+- [x] Settings page (theme toggle, Ollama model selector, data reset)
+- [x] Dark/light theme toggle (next-themes)
+- [x] Responsive layout pass — hamburger/bottom-tab nav <640px, anomaly
+      3-column stacks <1024px, live feed truncates to 10 rows <640px
 
 ## Phase 4 — Integration & polish
-- [ ] Wire frontend to all backend endpoints end-to-end
-- [ ] Seed script for demo-ready sample History/Dashboard data
-- [ ] docker-compose.yml for one-command run
-- [ ] GitHub Actions CI (lint + test, no deploy)
+- [x] Wire frontend to all backend endpoints end-to-end (no mock data —
+      added `alert_count`/`highest_severity`/`alerts` to `DetectionRunDetail`
+      and a whole `Settings` router that didn't exist before, since the
+      Settings/History pages had nothing real to call otherwise)
+- [x] Seed script for demo-ready sample History/Dashboard data
+      (`services/seed.py::seed_demo_history`, idempotent, `SEED_DEMO_DATA=false` to disable)
+- [x] docker-compose.yml for one-command run (`backend/Dockerfile`,
+      `frontend/Dockerfile` with standalone Next.js output)
+- [x] GitHub Actions CI (lint + test, no deploy) — `.github/workflows/ci.yml`
 - [ ] Write demo script/narration matched to live UI flow
 - [ ] Record backup demo video
 

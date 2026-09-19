@@ -12,7 +12,6 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 
 import os
 import tempfile
-import pytest
 
 # Use a file-based temp SQLite so all connections share the same DB
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -20,6 +19,7 @@ _tmp_db.close()
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp_db.name}"
 
 from fastapi.testclient import TestClient  # noqa: E402
+
 from database import init_db  # noqa: E402
 from services.seed import seed_model_evaluations  # noqa: E402
 
@@ -102,3 +102,68 @@ def test_post_detection_run_valid():
     data = resp.json()
     assert "detection_run_id" in data
     assert data["status"] == "running"
+
+
+def test_post_detection_run_invalid_category():
+    """held_out_category must be one of the NSL-KDD attack categories."""
+    resp = client.post(
+        "/api/detection-runs",
+        json={"held_out_category": "not_a_real_category", "model": "autoencoder", "threshold": 0.75},
+    )
+    assert resp.status_code == 400
+
+
+def test_model_checkpoints_load_successfully():
+    """
+    Regression test: checkpoints in backend/models/checkpoints/ were saved with
+    joblib.dump() (scaler.pkl, label_encoders.pkl, random_forest_baseline.pkl all
+    wrap numpy arrays in joblib.numpy_pickle.NumpyArrayWrapper) and the Autoencoder
+    checkpoint was trained with a 32-16-8 bottleneck. Loading them with plain
+    pickle.load() or a mismatched architecture both fail silently (model_loader
+    only logs a warning/error — anomaly scoring then silently degrades without
+    ever surfacing an API error). Calls the real startup entrypoint directly
+    (app startup events don't fire under a bare TestClient(app), so this can't
+    rely on main.py's @app.on_event("startup") having run) and asserts it
+    actually loaded, against the real checkpoint files on disk.
+    """
+    from services import model_loader
+
+    model_loader.load_all_models()
+
+    assert model_loader.models_are_ready() is True
+    assert len(model_loader.get_feature_cols()) > 0
+    model_loader.get_autoencoder()  # raises RuntimeError if not loaded
+    model_loader.get_random_forest()
+    model_loader.get_scaler()
+
+    # isolation_forest.pkl/isolation_forest_threshold.pkl — added by
+    # ml/scripts/train.py; the original notebook never produced these, so
+    # score_isolation_forest() used to silently delegate to the Autoencoder's
+    # score instead of actually scoring with an Isolation Forest.
+    model_loader.get_isolation_forest()
+    assert model_loader.get_if_threshold() > 0
+
+
+def test_list_scans_min_severity_rejects_invalid_value():
+    resp = client.get("/api/scans", params={"min_severity": "not_a_severity"})
+    assert resp.status_code == 400
+
+
+def test_ssrf_guard_blocks_localhost_target():
+    """A scan against a localhost target must be created then transition to
+    failed (per SECURITY.md — ALLOW_LOCALHOST_SCAN_TARGETS defaults to false)."""
+    import time
+
+    resp = client.post(
+        "/api/scans", json={"target_url": "http://localhost:9", "authorized": True}
+    )
+    assert resp.status_code == 202
+    scan_id = resp.json()["scan_id"]
+
+    for _ in range(20):
+        detail = client.get(f"/api/scans/{scan_id}").json()
+        if detail["status"] == "failed":
+            break
+        time.sleep(0.1)
+    assert detail["status"] == "failed"
+    assert any("SSRF" in f["description"] for f in detail["findings"])

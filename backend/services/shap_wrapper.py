@@ -20,14 +20,14 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
-def _extract_shap_array(shap_output: Any, sample_index: int = 0) -> Optional[np.ndarray]:
+def _extract_shap_array(shap_output: Any, sample_index: int = 0) -> np.ndarray | None:
     """
     Normalize the varied SHAP output formats into a 1D array of feature contributions.
 
@@ -77,10 +77,10 @@ def _extract_shap_array(shap_output: Any, sample_index: int = 0) -> Optional[np.
 
 def compute_shap_for_instance(
     feature_vector: np.ndarray,
-    feature_names: List[str],
+    feature_names: list[str],
     model_name: str = "autoencoder",
     top_n: int = 5,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute SHAP values for a single feature vector.
 
@@ -94,6 +94,7 @@ def compute_shap_for_instance(
     """
     try:
         import shap
+
         from services.model_loader import get_autoencoder, get_feature_cols, get_random_forest
 
         feature_names = feature_names or get_feature_cols()

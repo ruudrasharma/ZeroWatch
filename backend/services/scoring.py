@@ -28,10 +28,10 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 # Weight per severity level
-SEVERITY_WEIGHTS: Dict[str, int] = {
+SEVERITY_WEIGHTS: dict[str, int] = {
     "critical": 25,
     "high": 15,
     "medium": 8,
@@ -52,7 +52,7 @@ PASS_KEYWORDS = (
 )
 
 
-def _is_pass_finding(finding: Dict[str, Any]) -> bool:
+def _is_pass_finding(finding: dict[str, Any]) -> bool:
     """Detect informational 'all clear' findings that should not increase score."""
     severity = (finding.get("severity") or "").lower()
     title = (finding.get("title") or "").lower()
@@ -63,7 +63,7 @@ def _is_pass_finding(finding: Dict[str, Any]) -> bool:
     return False
 
 
-def compute_risk_score(findings: List[Dict[str, Any]]) -> int:
+def compute_risk_score(findings: list[dict[str, Any]]) -> int:
     """
     Compute a composite risk score 0–100 from a list of finding dicts.
 

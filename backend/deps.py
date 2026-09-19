@@ -8,7 +8,7 @@ Authors:
 B.Tech CSE (Cybersecurity), The NorthCap University.
 """
 
-from typing import Generator
+from collections.abc import Generator
 
 from sqlalchemy.orm import Session, sessionmaker
 

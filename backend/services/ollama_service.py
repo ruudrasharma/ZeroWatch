@@ -20,15 +20,29 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 OLLAMA_TIMEOUT: float = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+
+# Mutable at runtime via POST /api/settings/ollama-model (Settings page model
+# selector, UI_UX_SPEC.md §3.7) — starts from .env, in-memory only (does not
+# persist across a restart; this is a local single-user tool, not multi-tenant
+# config that needs a durable store).
+_active_model: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+
+
+def get_active_model() -> str:
+    return _active_model
+
+
+def set_active_model(model: str) -> None:
+    global _active_model
+    _active_model = model
 
 # Prompt templates (structured JSON → LLM → human-readable explanation)
 
@@ -66,7 +80,7 @@ End with: "[AI-GENERATED — verify before acting]"
 """
 
 
-async def generate_finding_remediation(finding: Dict[str, Any]) -> str:
+async def generate_finding_remediation(finding: dict[str, Any]) -> str:
     """
     Generate AI remediation text for a single Recon finding.
     Returns the generated text, or a fallback string if Ollama is unavailable.
@@ -89,10 +103,10 @@ async def generate_finding_remediation(finding: Dict[str, Any]) -> str:
 
 
 async def generate_shap_explanation(
-    shap_values: Dict[str, float],
+    shap_values: dict[str, float],
     anomaly_score: float,
     threshold: float,
-    flow_context: Optional[Dict[str, Any]] = None,
+    flow_context: dict[str, Any] | None = None,
 ) -> str:
     """
     Generate a plain-English explanation of SHAP values for an anomaly alert.
@@ -119,7 +133,7 @@ async def _call_ollama(prompt: str, context: str = "") -> str:
     Returns the generated text, or a labeled fallback if unavailable.
     """
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": _active_model,
         "prompt": prompt,
         "stream": False,
         "options": {

@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 
 from sqlalchemy import (
-    Boolean,
     Column,
     DateTime,
     Float,
@@ -22,7 +21,6 @@ from sqlalchemy import (
     Integer,
     Text,
     create_engine,
-    text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func

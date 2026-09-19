@@ -33,6 +33,14 @@ NVD_RATE_LIMIT=5
 NVD_RATE_WINDOW_SECONDS=30
 VIRUSTOTAL_RATE_LIMIT=4
 VIRUSTOTAL_RATE_WINDOW_SECONDS=60
+
+# Anomaly replay pacing
+REPLAY_DELAY_SECONDS=0.05
+
+# Seeds sample scans/detection runs on first startup so Dashboard/History
+# aren't empty (skipped if those tables already have data). Set false to
+# start from a genuinely empty database.
+SEED_DEMO_DATA=true
 ```
 
 ## Frontend `.env.local` (in `frontend/.env.local`)
