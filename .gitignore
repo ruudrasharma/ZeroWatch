@@ -1,0 +1,68 @@
+# ============================
+# ZeroWatch — root .gitignore
+# ============================
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ─── Virtual environments ───
+venv/
+.venv/
+env/
+
+# ─── Secrets — NEVER commit real .env files ───
+.env
+.env.local
+backend/.env
+frontend/.env.local
+
+# ─── Database (local state) ───
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Model checkpoints ───
+# Models are tracked in this repository for ease of setup.
+# Ensure file sizes do not exceed GitHub's 100MB limit.
+backend/models/checkpoints/*.h5
+
+# ─── Data / exports ───
+backend/data/raw/
+backend/data/processed/
+backend/data/exports/*.pdf
+
+# ─── Node / frontend ───
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+out/
+frontend/out/
+
+# ─── OS / editor ───
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ─── Logs ───
+*.log
+
+# ─── Pytest / coverage ───
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ─── Ruff / mypy cache ───
+.ruff_cache/
+.mypy_cache/
+
+# ─── Jupyter checkpoints ───
+.ipynb_checkpoints/
