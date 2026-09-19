@@ -68,6 +68,37 @@ All notable changes to this project are documented here. Format loosely follows 
   first push. Fixed via `ruff check --fix` plus one manual fix; full suite
   still 13/13 passing afterward.
 
+### Fixed — found via live browser click-through (Claude in Chrome), not caught by build/lint/pytest
+- **Every `sm:` responsive variant was dead app-wide**: `globals.css` used the
+  old Tailwind v3 `@tailwind base; @tailwind components; @tailwind utilities;`
+  directives instead of v4's `@import "tailwindcss";` entry point. Combined
+  with the custom `@theme inline` block, this silently dropped Tailwind's
+  default breakpoint tokens — confirmed live: at a 1512px viewport, the
+  desktop nav's `hidden sm:block` computed to `display: none` and the mobile
+  bottom-tab nav's `sm:hidden` stayed `display: flex`, with its `fixed
+  inset-x-0 bottom-0` also not resolving (computed `position: fixed; top:
+  8px; bottom: 748px; width: 247px` instead of pinned full-width to the
+  viewport bottom) — both navs rendered simultaneously, overlapping page
+  content, on every screen size. Fixed by switching to `@import
+  "tailwindcss";`; verified after the fix that the desktop/mobile nav switch
+  correctly at the `sm` breakpoint and the anomaly dashboard's 3-column
+  layout properly stacks on a 390px-wide viewport.
+- `ScoreChart`'s Y-axis labels were clipped (a `margin.left: -20` combined
+  with `width={36}` cut off the leading digit of "0.75"/"0.25", rendering as
+  "'5"). Fixed the margin and widened the axis.
+- `ShapBarChart`'s feature-name labels silently truncated from the *left*
+  when too long for the Y-axis width (e.g. `dst_host_srv_rerror_rate`
+  rendered as `_host_srv_rerror_rate`, losing the `dst` prefix — genuinely
+  misleading for a feature-attribution chart). Fixed with an explicit
+  right-truncating `tickFormatter` (ellipsis) instead of relying on SVG
+  clipping.
+- (Not an app bug, but recorded as a process note): running `npm run build`
+  while `npm run dev` was also serving the same `.next/` directory corrupted
+  the dev server's chunk manifest, cascading into "every `_next/static/*`
+  asset 404s, page renders unstyled" — looked exactly like a broken build at
+  first glance. Fixed by stopping dev, `rm -rf .next`, restarting. Don't run
+  `next build` against a `.next/` directory an active `next dev` is using.
+
 ## [0.2.1] — 2026-09-19 — Phase A: Backend audit & fixes
 
 ### Fixed
