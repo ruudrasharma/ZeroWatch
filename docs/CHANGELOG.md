@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0] — 2026-11-09 — Preprocessing audit: leakage fix + backend bug fixes
+
+### Fixed
+- **Data leakage in preprocessing**: `StandardScaler` (and the label encoders) were fitted on the
+  *whole* dataset before the leave-one-attack-out split, so the held-out "zero-day" category
+  influenced the scaling used to detect it. All fitted statistics now come from each run's training
+  rows only (`ml/scripts/preprocess.py`); `ml/tests/` pins this with unit tests (also a CI job).
+- **Nominal columns were label-encoded**: `protocol_type`, `service`, `flag` got arbitrary integer
+  codes, implying an order that does not exist. They are now one-hot encoded (unseen categories
+  at inference become all-zero rows instead of errors).
+- **Duplicate rows across the split**: KDDTrain+ and KDDTest+ overlap (610 identical rows), so an
+  identical record could land in both train and test. Exact duplicates are dropped at load time.
+- **SMOTE on one-hot features** produced fractional "categories"; replaced by
+  `class_weight="balanced_subsample"` in the supervised baseline.
+- **`score_random_forest()` assumed class 0 = Normal.** sklearn orders `predict_proba` columns
+  alphabetically, so the old code ignored one attack class and counted P(Normal) as attack
+  probability. Now `1 - P(Normal)` using `rf.classes_`.
+- **Signature rules could never fire**: they referenced CICIDS-only fields (`syn_flag_count`,
+  `packet_rate`, ...) absent from NSL-KDD. Rewritten as NSL-KDD rules evaluated on the raw record
+  (on the replay file: 70 % of DoS, 20 % of Probe, 3 % of R2L matched; 0.8 % of normal rows).
+- **Live replay silently used synthetic scores**: nothing ever produced `data/processed/`.
+  `ml.scripts.train` now writes `nsl_kdd_test.csv` (raw rows the production Autoencoder never trained on).
+- README/docs claimed CICIDS2017/2018; the pipeline uses NSL-KDD. Docs corrected.
+
+### Changed
+- Checkpoints: `scaler.pkl` + `label_encoders.pkl` replaced by `preprocessor.pkl` (one sklearn
+  `ColumnTransformer`) + `raw_feature_cols.pkl`; added `preprocessing_report.json` and
+  `leave_one_out_auc.csv` (ROC-AUC / PR-AUC, threshold-free). Model input is now 111 features
+  (was 41 label-encoded). Production models come from one leave-one-out run together with its own
+  preprocessor so every checkpoint matches the preprocessing that produced it.
+- Replay engine preprocesses the whole replay file once at stream start (not per flow).
+
+### Added
+- `ml/notebooks/CSL236_MidTerm.ipynb` (+ PDF export): course mid-term preprocessing notebook,
+  stages A–H with written justifications, executed end to end. The original Colab notebook is
+  marked superseded (it still contains the leaky preprocessing).
+- Backend regression tests for the signature rules, RF class lookup and preprocessor/model dimensions.
+
+### Results after the fixes (leave-one-attack-out, 95th-percentile threshold, Autoencoder F1)
+DoS 0.971 → 0.958 · Probe 0.875 → 0.909 · R2L 0.394 → 0.415 · U2R 0.117 → 0.144.
+Isolation Forest Probe F1 0.716 → 0.927. Random Forest (supervised contrast case) U2R F1 0.288 → 0.122.
+The leakage fix changed the headline numbers only modestly. U2R stays low at a fixed ~5 % FPR
+because there are only ~119 positives against ~23 000 normal rows (precision is structurally
+capped); its threshold-free ranking is much better (Autoencoder ROC-AUC 0.96, R2L 0.91).
+
 ## [0.3.0] — 2026-09-19 — Phase B/C: Frontend build + integration + ml/scripts
 
 ### Added

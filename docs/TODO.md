@@ -11,6 +11,8 @@ Living list of remaining work, tracked against the build order from PRD.md/prior
       copy-pasted table) so `model_evaluations` and the Evaluation page
       always match whatever checkpoints are actually loaded
 - [x] Copy trained checkpoints into `backend/models/checkpoints/` — `ml/scripts/train.py --output-dir backend/models/checkpoints` does this directly, no manual zip/copy step
+- [x] Preprocessing audit: leakage-free fit-on-train-only pipeline, one-hot nominal columns, log1p on skewed columns, duplicate removal, threshold-free AUC metrics (CHANGELOG [0.4.0])
+- [x] CSL236 mid-term notebook `ml/notebooks/CSL236_MidTerm.ipynb` (+ PDF) — fill in the team number in its first cell and rename files to `TeamNo_MidTermProject.*`
 - [ ] (Optional) Swap dataset loader to CICIDS2017/2018 per `ml/README.md` notes, re-run, compare results
 
 ## Phase 2 — Backend
@@ -68,8 +70,14 @@ Living list of remaining work, tracked against the build order from PRD.md/prior
 
 ## Known issues / risks to track
 - [ ] Confirm Llama 3.1 8B runs acceptably on the actual demo machine's RAM — fall back to Mistral 7B/Phi-3 if not
-- [ ] Confirm CICIDS2017/2018 download size and preprocessing time fits available time/disk
 - [ ] Verify VirusTotal free-tier rate limit (4/min) doesn't stall the demo if multiple checks fire close together
+
+## Phase 5 — MLOps (from the BrainMentors workshop; local-only, no Render deploy)
+- [ ] `GET /health` reporting models/Ollama readiness (Docker healthcheck currently probes `/dashboard/summary`)
+- [ ] `POST /api/predict` — validated single-flow scoring endpoint (score, verdict, SHAP) with Pydantic request/response models
+- [ ] MLflow: log params/metrics/artifacts from `ml/scripts/train.py`, register the Autoencoder versions, add an `mlflow` service to docker-compose
+- [ ] Prometheus `/metrics` (request count/latency, anomaly-score histogram, flagged-alert rate as a drift signal); optional Grafana service
+- [ ] CI: build the Docker images and smoke-test the container; push to Docker Hub
 
 ## Stretch goals (only if core is done early)
 - [ ] Shodan integration for exposed service/port checks

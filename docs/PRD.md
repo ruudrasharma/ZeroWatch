@@ -42,7 +42,7 @@ ZeroWatch addresses both gaps in one platform, fully local, with no cloud depend
 - PDF export
 
 ### 5.2 Zero-Day Anomaly Engine
-- Dataset-driven live traffic replay (CICIDS2017/2018)
+- Dataset-driven live traffic replay (NSL-KDD)
 - Real-time anomaly scoring via WebSocket stream
 - Leave-one-attack-out evaluation mode
 - Multi-model comparison: Autoencoder / Isolation Forest / Random Forest baseline

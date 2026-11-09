@@ -9,9 +9,12 @@ Checkpoint files (real outputs from ml/scripts/train.py, a .py port of
 ml/notebooks/ZeroWatch_Model_Training.ipynb — see ml/README.md):
   - autoencoder.pt                  PyTorch Autoencoder state dict
   - autoencoder_threshold.pkl       Reconstruction-error threshold scalar
-  - scaler.pkl                      StandardScaler fitted to training features
-  - label_encoders.pkl              Dict[str, LabelEncoder] for categorical columns
-  - feature_cols.pkl                List[str] of feature column names
+  - preprocessor.pkl                sklearn ColumnTransformer (one-hot + log1p + scaling),
+                                     fitted on TRAINING rows only; maps the 41 raw
+                                     NSL-KDD columns → the model feature vector
+  - raw_feature_cols.pkl            List[str] of the 41 raw input columns the
+                                     preprocessor expects
+  - feature_cols.pkl                List[str] of model feature names (preprocessor output)
   - random_forest_baseline.pkl      Trained RandomForestClassifier
   - isolation_forest.pkl            Trained IsolationForest (all-normal-traffic fit)
   - isolation_forest_threshold.pkl  Anomaly-score threshold scalar (same
@@ -43,8 +46,8 @@ CHECKPOINT_DIR = Path(__file__).parent.parent / "models" / "checkpoints"
 # ─── Global singletons (loaded once at startup) ───────────────────────────────
 _autoencoder: Autoencoder | None = None
 _ae_threshold: float | None = None
-_scaler: Any | None = None
-_label_encoders: dict[str, Any] | None = None
+_preprocessor: Any | None = None
+_raw_feature_cols: list[str] | None = None
 _feature_cols: list[str] | None = None
 _random_forest: Any | None = None
 _isolation_forest: Any | None = None
@@ -88,7 +91,7 @@ def load_all_models() -> None:
     Logs warnings if files are missing (graceful degradation — REST endpoints
     still work, only anomaly scoring will return an error).
     """
-    global _autoencoder, _ae_threshold, _scaler, _label_encoders, _feature_cols
+    global _autoencoder, _ae_threshold, _preprocessor, _raw_feature_cols, _feature_cols
     global _random_forest, _isolation_forest, _if_threshold, _models_ready
 
     if not CHECKPOINT_DIR.exists():
@@ -112,15 +115,11 @@ def load_all_models() -> None:
         _feature_cols = joblib.load(feature_cols_path)
         logger.info("Loaded feature_cols: %d features", len(_feature_cols))
 
-        # ── scaler ────────────────────────────────────────────────────────────
-        scaler_path = CHECKPOINT_DIR / "scaler.pkl"
-        _scaler = joblib.load(scaler_path)
-        logger.info("Loaded StandardScaler")
-
-        # ── label_encoders ────────────────────────────────────────────────────
-        le_path = CHECKPOINT_DIR / "label_encoders.pkl"
-        _label_encoders = joblib.load(le_path)
-        logger.info("Loaded label_encoders: %d encoders", len(_label_encoders))
+        # ── preprocessor (one-hot + log1p + scaling, fitted on train rows only) ──
+        _preprocessor = joblib.load(CHECKPOINT_DIR / "preprocessor.pkl")
+        _raw_feature_cols = joblib.load(CHECKPOINT_DIR / "raw_feature_cols.pkl")
+        logger.info("Loaded preprocessor (%d raw columns → %d features)",
+                    len(_raw_feature_cols), len(_feature_cols))
 
         # ── autoencoder threshold ─────────────────────────────────────────────
         threshold_path = CHECKPOINT_DIR / "autoencoder_threshold.pkl"
@@ -170,16 +169,27 @@ def get_feature_cols() -> list[str]:
     return _feature_cols
 
 
-def get_scaler() -> Any:
-    if _scaler is None:
+def get_preprocessor() -> Any:
+    if _preprocessor is None:
         raise RuntimeError("Models not loaded")
-    return _scaler
+    return _preprocessor
 
 
-def get_label_encoders() -> dict[str, Any]:
-    if _label_encoders is None:
+def get_raw_feature_cols() -> list[str]:
+    if _raw_feature_cols is None:
         raise RuntimeError("Models not loaded")
-    return _label_encoders
+    return _raw_feature_cols
+
+
+def transform_flows(df: Any) -> np.ndarray:
+    """
+    Raw NSL-KDD flow records (DataFrame with the 41 raw columns) → model-ready
+    float32 matrix, using the preprocessor fitted at training time. Unknown
+    categorical values (a service never seen in training) become all-zero
+    one-hot rows rather than errors.
+    """
+    cols = get_raw_feature_cols()
+    return get_preprocessor().transform(df[cols]).astype(np.float32)
 
 
 def get_autoencoder() -> Autoencoder:
@@ -253,13 +263,12 @@ def score_isolation_forest(features: np.ndarray) -> float:
 
 def score_random_forest(features: np.ndarray) -> float:
     """
-    Random Forest: probability of attack class (class index 1 in binary output).
+    Random Forest attack score: 1 - P(Normal).
+
+    sklearn orders predict_proba columns alphabetically (rf.classes_), so
+    "Normal" is NOT column 0 — look its index up rather than assuming it.
     """
     rf = get_random_forest()
-    proba = rf.predict_proba(features.reshape(1, -1))
-    # proba shape: (1, n_classes) — take the max non-normal-class probability
-    if proba.shape[1] == 2:
-        return float(proba[0, 1])
-    else:
-        # Multi-class: return max attack class probability
-        return float(proba[0, 1:].max())
+    proba = rf.predict_proba(features.reshape(1, -1))[0]
+    normal_idx = list(rf.classes_).index("Normal")
+    return float(1.0 - proba[normal_idx])

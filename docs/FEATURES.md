@@ -39,7 +39,7 @@
 ## Zero-Day Anomaly Engine
 
 ### Dataset replay
-- Pre-processed CICIDS2017/2018 flow records replayed over WebSocket at a configurable pace (default: simulate real-time inter-arrival spacing, capped for demo watchability).
+- Raw NSL-KDD flow records (`backend/data/processed/nsl_kdd_test.csv`, written by `python -m ml.scripts.train`; preprocessed once at stream start with the saved `preprocessor.pkl`) replayed over WebSocket at a configurable pace (default: simulate real-time inter-arrival spacing, capped for demo watchability).
 
 ### Model scoring
 - **Autoencoder**: reconstruction error on the flow's feature vector = anomaly score, normalized 0–1.

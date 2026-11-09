@@ -32,6 +32,24 @@ jobs:
       - name: Pytest
         run: pytest -q
 
+  ml:
+    name: ML preprocessing (leakage tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Preprocessing tests need no torch and no network — they pin the
+      # "fit on training rows only" guarantee in ml/scripts/preprocess.py.
+      - name: Install dependencies
+        run: pip install numpy pandas scikit-learn httpx pytest
+
+      - name: Pytest
+        run: python -m pytest ml/tests -q
+
   frontend:
     name: Frontend (lint + build)
     runs-on: ubuntu-latest
