@@ -15,7 +15,7 @@ Given this is an academic/portfolio project with a hard demo deadline, prioritiz
 ## 3. Backend — integration tests
 
 - Full scan flow against a local mock HTTP server (not a real external site) — verify a scan request produces a completed report with expected finding categories.
-- Full detection-run flow using a small fixture dataset (a handful of labeled flows) instead of the full CICIDS dataset — verify WebSocket emits `flow` and `alert` events in the expected shape and a `run_completed` summary is produced.
+- Full detection-run flow using a small fixture dataset (a handful of labeled flows) instead of the full NSL-KDD dataset — verify WebSocket emits `flow` and `alert` events in the expected shape and a `run_completed` summary is produced.
 - SQLite persistence: verify scans/findings/detection_runs/alerts round-trip correctly through the ORM.
 
 ## 4. ML evaluation tests (this is the credibility-critical section)

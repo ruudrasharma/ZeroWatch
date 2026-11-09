@@ -45,12 +45,12 @@ from sqlalchemy.orm import Session
 from database import Alert, DetectionRun
 from services.model_loader import (
     get_feature_cols,
-    get_label_encoders,
-    get_scaler,
+    get_raw_feature_cols,
     models_are_ready,
     score_autoencoder,
     score_isolation_forest,
     score_random_forest,
+    transform_flows,
 )
 from services.ollama_service import generate_shap_explanation
 from services.shap_wrapper import compute_shap_for_instance
@@ -61,24 +61,37 @@ PROCESSED_DATA_DIR = Path(__file__).parent.parent / "data" / "processed"
 REPLAY_DELAY_SECONDS: float = float(os.getenv("REPLAY_DELAY_SECONDS", "0.05"))  # 20 flows/sec default
 
 # ─── Snort-style signature rules (hardcoded, per FEATURES.md §Signature comparison) ──
+# Evaluated on the RAW NSL-KDD record (not the scaled model input), the way a
+# rule-based IDS sees traffic. Every condition in a rule must hold. These used
+# to reference CICIDS-style fields (syn_flag_count, packet_rate, ...) that do
+# not exist in NSL-KDD, so no rule could ever match.
 _SNORT_SIGNATURES: list[dict[str, Any]] = [
-    {"name": "SYN_FLOOD", "description": "High-rate SYN packets (DoS indicator)", "field": "syn_flag_count", "op": "gt", "threshold": 100},
-    {"name": "PORT_SCAN", "description": "Single src hitting many dst ports", "field": "dst_port_count", "op": "gt", "threshold": 50},
-    {"name": "LARGE_PAYLOAD", "description": "Abnormally large average payload", "field": "avg_packet_size", "op": "gt", "threshold": 1400},
-    {"name": "HIGH_RATE", "description": "Anomalously high packet rate", "field": "packet_rate", "op": "gt", "threshold": 10000},
+    {"name": "SYN_FLOOD", "description": "Many connections, nearly all failing the SYN handshake (DoS)",
+     "all": [("count", ">", 100), ("serror_rate", ">", 0.8)]},
+    {"name": "PORT_SCAN", "description": "Many connections spread across many services / rejected (probe)",
+     "all": [("count", ">", 50), ("diff_srv_rate", ">", 0.5)]},
+    {"name": "REJECT_SWEEP", "description": "High rate of rejected connections (sweep / probe)",
+     "all": [("count", ">", 50), ("rerror_rate", ">", 0.8)]},
+    {"name": "BRUTE_FORCE_LOGIN", "description": "Repeated failed logins in one connection (R2L)",
+     "all": [("num_failed_logins", ">=", 3)]},
+    {"name": "ROOT_PRIVILEGE", "description": "Root shell obtained / root-level operations (U2R)",
+     "all": [("root_shell", ">=", 1)]},
+    {"name": "LARGE_PAYLOAD", "description": "Abnormally large transfer from source",
+     "all": [("src_bytes", ">", 1_000_000)]},
 ]
 
+_OPS = {">": lambda a, b: a > b, ">=": lambda a, b: a >= b}
 
-def _check_signatures(flow_features: dict[str, float]) -> list[str]:
+
+def _check_signatures(raw_flow: dict[str, Any]) -> list[str]:
     """Return list of matched signature names (empty = no match)."""
     matched = []
     for sig in _SNORT_SIGNATURES:
-        field = sig["field"]
-        val = flow_features.get(field)
-        if val is None:
-            continue
-        if sig["op"] == "gt" and val > sig["threshold"]:
-            matched.append(sig["name"])
+        try:
+            if all(_OPS[op](float(raw_flow[field]), thr) for field, op, thr in sig["all"]):
+                matched.append(sig["name"])
+        except (KeyError, TypeError, ValueError):
+            continue  # field missing (e.g. synthetic flow) → rule can't fire
     return matched
 
 
@@ -196,8 +209,7 @@ async def replay_and_stream(
         return
 
     feature_cols = get_feature_cols()
-    scaler = get_scaler()
-    label_encoders = get_label_encoders()
+    raw_cols = get_raw_feature_cols()
 
     # Load dataset
     df = _load_dataset(held_out)
@@ -206,23 +218,18 @@ async def replay_and_stream(
     tp = fp = tn = fn = 0
     alert_count = 0
 
+    x_all: np.ndarray | None = None
     if df is not None:
-        # Preprocess flow records using the fitted scaler
-        cat_cols = list(label_encoders.keys()) if label_encoders else []
-
-        # Encode categorical columns
-        for col in cat_cols:
-            if col in df.columns and col in label_encoders:
-                le = label_encoders[col]
-                df[col] = df[col].apply(
-                    lambda v: le.transform([v])[0] if v in le.classes_ else 0
-                )
-
-        # Select and fill missing feature columns
-        available = [c for c in feature_cols if c in df.columns]
-        if not available:
-            # Feature columns don't match — fall back to synthetic
+        missing = [c for c in raw_cols if c not in df.columns]
+        if missing:
+            logger.warning("Replay dataset lacks %d expected raw columns (%s…) — using synthetic",
+                           len(missing), missing[:3])
             df = None
+        else:
+            # Preprocess the whole replay file ONCE with the preprocessor fitted
+            # at training time (one-hot + log1p + scaling) — not per flow.
+            df = df.reset_index(drop=True)
+            x_all = transform_flows(df)
 
     use_synthetic = df is None
     if use_synthetic:
@@ -276,24 +283,17 @@ async def replay_and_stream(
                 dst_ip = str(row.get("dst_ip", f"192.168.1.{flow_num % 255}"))
                 protocol = str(row.get("protocol_type", row.get("protocol", "TCP")))
                 true_label = str(row.get("label", row.get("class", "BENIGN")))
-                # Extract numeric features
-                feat_vals = []
-                for c in feature_cols:
-                    feat_vals.append(float(row.get(c, 0.0)))
-                raw_features = np.array(feat_vals)
+                raw_row = row.to_dict()
+                scaled_row = x_all[idx]
 
             flow_num += 1
 
-            # Scale features — synthetic flows are already generated directly in
-            # scaled feature space (see _make_synthetic_flows), so only real
-            # dataset rows go through the fitted StandardScaler.
+            # Synthetic flows are generated directly in model-input space; real
+            # replay rows were already preprocessed (x_all) before the loop.
             if use_synthetic:
                 scaled = raw_features
             else:
-                try:
-                    scaled = scaler.transform(raw_features.reshape(1, -1))[0]
-                except Exception:
-                    scaled = raw_features
+                scaled = scaled_row
 
             # Score — synthetic flows carry a pre-generated believable score (see
             # _make_synthetic_flows for why fabricated noise isn't scored through
@@ -347,16 +347,12 @@ async def replay_and_stream(
                 alert_count += 1
 
                 # SHAP (only for flagged flows — performance optimization per FEATURES.md)
-                flow_features_dict = {
-                    fname: float(val)
-                    for fname, val in zip(feature_cols, scaled)
-                }
                 shap_values = compute_shap_for_instance(
                     scaled, feature_cols, model_name=model_name
                 )
 
                 # Signature comparison
-                matched_sigs = _check_signatures(flow_features_dict)
+                matched_sigs = _check_signatures({} if use_synthetic else raw_row)
                 sig_text = ", ".join(matched_sigs) if matched_sigs else "none"
 
                 # LLM explanation

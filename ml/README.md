@@ -7,7 +7,10 @@ This folder contains the actual model training/evaluation work — separate from
 ```
 ml/
 ├── notebooks/
-│   └── ZeroWatch_Model_Training.ipynb   ← the original, run this in Google Colab
+│   ├── CSL236_MidTerm.ipynb              ← course mid-term: preprocessing stages A–H, fully executed
+│   ├── CSL236_MidTerm.pdf                ← PDF export of the executed notebook
+│   └── ZeroWatch_Model_Training.ipynb   ← ORIGINAL Colab notebook — superseded, see note below
+├── tests/                                ← preprocessing leakage tests: python -m pytest ml/tests
 ├── scripts/                              ← .py port of the notebook, for reproducible/
 │   ├── data.py                              automated re-runs outside Colab (no Colab
 │   ├── preprocess.py                        account needed, no manual "download the zip
@@ -33,12 +36,31 @@ evaluation table and never persisted a production one, which is why
 `backend/services/model_loader.score_isolation_forest()` used to be a proxy
 that silently delegated to the Autoencoder's score instead.
 
-Downloads NSL-KDD directly (public URL, no auth), runs the full
-leave-one-attack-out evaluation across `DoS`/`Probe`/`R2L`/`U2R`, trains the
-production Autoencoder + Isolation Forest + Random Forest, and writes all 7
-checkpoint files plus `leave_one_out_results.csv` straight into
-`backend/models/checkpoints/` — ready for the backend to load on next
-startup, no manual zip/unzip step.
+Downloads NSL-KDD directly (public URL, no auth), drops the ~600 exact duplicate
+rows, runs the full leave-one-attack-out evaluation across `DoS`/`Probe`/`R2L`/`U2R`
+and writes, straight into `backend/models/checkpoints/`:
+
+- `autoencoder.pt`, `isolation_forest.pkl`, `random_forest_baseline.pkl` and the two threshold `.pkl`s
+- `preprocessor.pkl` (+ `raw_feature_cols.pkl`, `feature_cols.pkl`) — the fitted preprocessing pipeline
+- `leave_one_out_results.csv` (thresholded metrics) and `leave_one_out_auc.csv` (ROC-AUC / PR-AUC)
+- `preprocessing_report.json` — which columns were one-hot / log-transformed / dropped and why
+
+It also writes `backend/data/processed/nsl_kdd_test.csv` (raw rows the production
+Autoencoder never trained on) so the live dashboard replays real traffic instead of
+synthetic scores; pass `--no-replay` to skip it. The production models are the ones from
+one leave-one-out run (`--production-rf-category`, default `Probe`) together with that
+run's preprocessor, so every checkpoint matches the preprocessing that produced it.
+
+### Preprocessing is leakage-free
+
+Everything that learns from data (one-hot categories, which columns to log-transform,
+the correlation filter, means/variances) is fitted on the **training rows of each split
+only** (`ml/scripts/preprocess.py`). The held-out attack category and the test rows never
+influence a fitted statistic — the earlier version fitted its scaler on the whole dataset
+before splitting, which leaked the very zero-day traffic the evaluation is meant to be
+blind to. Nominal columns (`protocol_type`, `service`, `flag`) are one-hot encoded, skewed
+byte/count columns get `log1p`, constant and highly correlated (|r| > 0.95) columns are
+dropped. `python -m pytest ml/tests` checks these guarantees.
 
 Takes a few minutes on CPU (no GPU required — the models are small). For a
 fast correctness check of the pipeline itself rather than a real training
@@ -48,7 +70,11 @@ run, use `--quick` (subsamples the dataset, reduces epochs/estimators):
 python -m ml.scripts.train --output-dir /tmp/ml_smoke --quick
 ```
 
-## Running the notebook (alternative — if you want Colab's plots/SHAP demo cells)
+## Running the original notebook (alternative — if you want Colab's plots/SHAP demo cells)
+
+> **Superseded.** `ZeroWatch_Model_Training.ipynb` still contains the original preprocessing
+> (scaler fitted before the split, label-encoded nominal columns). Use `ml/scripts` for
+> checkpoints, and `CSL236_MidTerm.ipynb` for the correct, explained preprocessing stages.
 
 1. Open `ZeroWatch_Model_Training.ipynb` in Google Colab (upload it, or push this repo to GitHub and open directly via `File → Open notebook → GitHub`).
 2. Runtime → Change runtime type → **GPU** (not required, but trains faster).
@@ -72,4 +98,4 @@ for regenerating those figures.
 
 ## Swapping the dataset
 
-The notebook uses NSL-KDD for zero-setup reproducibility (important for an evaluator re-running it). To use CICIDS2017/2018 instead (as originally scoped in `PRD.md`), only Section 2 (data loading) and Section 3 (attack category mapping) need to change — everything from Section 5 onward is dataset-agnostic. See the notebook's final markdown cell for the specific swap notes.
+The pipeline uses NSL-KDD for zero-setup reproducibility. To use CICIDS2017/2018 instead, replace `ml/scripts/data.py` (loading + attack-category mapping) and the column lists at the top of `ml/scripts/preprocess.py` (`NOMINAL_COLS`, `BINARY_COLS`, `RAW_FEATURE_COLS`); the evaluation harness itself is dataset-agnostic. The backend's replay engine and signature rules (`backend/services/anomaly_engine.py`) are NSL-KDD-specific and would need the same swap.

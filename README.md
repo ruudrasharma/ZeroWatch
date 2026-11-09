@@ -11,7 +11,7 @@ No cloud deployment. No paid APIs. No data leaves your machine. Everything runs 
 ZeroWatch has two engines:
 
 1. **Recon Engine** — paste a URL, get a full vulnerability report: SSL/TLS grade, security headers, cookie flags, tech fingerprinting, CVE cross-reference, exposed paths, subdomain enumeration — all explained in plain English by a locally-running LLM.
-2. **Zero-Day Anomaly Engine** — replays labeled network traffic (CICIDS2017/2018) through an unsupervised Autoencoder trained only on "seen" traffic categories, and flags previously-unseen ("zero-day") attack patterns that a signature-based IDS would miss. Includes live SHAP explainability and leave-one-attack-out evaluation.
+2. **Zero-Day Anomaly Engine** — replays labeled network traffic (NSL-KDD) through an unsupervised Autoencoder trained only on "seen" traffic categories, and flags previously-unseen ("zero-day") attack patterns that a signature-based IDS would miss. Includes live SHAP explainability and leave-one-attack-out evaluation.
 
 See [`docs/PRD.md`](docs/PRD.md) for full product scope and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit together.
 

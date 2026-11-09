@@ -67,4 +67,4 @@ Both `backend/.env.example` and `frontend/.env.local.example` should be committe
 
 ## Dataset setup
 
-- CICIDS2017/2018 is not redistributed in the repo (large, licensed for research use). `docs/ENVIRONMENT.md` should link to the official download source, and `scripts/prepare_data.py` should document the expected raw file layout under `data/raw/` and output the processed flow feature files to `data/processed/`.
+- NSL-KDD is not committed to the repo. `python -m ml.scripts.train` downloads it from a public mirror, trains the models, and writes the replay file `backend/data/processed/nsl_kdd_test.csv` (git-ignored). Without that file the live anomaly dashboard falls back to synthetic demo scores.

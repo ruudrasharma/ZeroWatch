@@ -38,11 +38,11 @@ Exact versions are pinned at project start and updated here as they change — k
 |---|---|---|
 | Deep learning | PyTorch | 2.6.x — Autoencoder implementation (bumped from 2.4.1; no wheels for Python 3.13, see CHANGELOG.md [0.2.1]) |
 | Classical ML | scikit-learn | 1.6.x — Isolation Forest, Random Forest baseline (bumped from 1.5.2, same reason) |
-| Model persistence | joblib | required, not optional — checkpoints (`scaler.pkl`, `label_encoders.pkl`, `random_forest_baseline.pkl`) are joblib-native format; loading with plain `pickle.load()` corrupts on the out-of-band numpy array encoding |
+| Model persistence | joblib | required, not optional — checkpoints (`preprocessor.pkl`, `random_forest_baseline.pkl`) are joblib-native format; loading with plain `pickle.load()` corrupts on the out-of-band numpy array encoding |
 | Explainability | SHAP | 0.47.x |
-| Imbalance handling | imbalanced-learn (SMOTE) | latest |
+| Imbalance handling | RandomForest `class_weight="balanced_subsample"` | SMOTE was dropped: it interpolates one-hot columns into invalid fractional categories |
 | Data handling | pandas, NumPy | pandas 2.2.x, NumPy 2.1.x (bumped from 1.26.4, same Python 3.13 reason) |
-| Dataset | NSL-KDD (training notebook) — CICIDS2017/2018 documented as a drop-in swap, not yet done | pre-extracted flow features |
+| Dataset | NSL-KDD (`ml/scripts`, CSL236 notebook) — CICIDS2017/2018 documented as a drop-in swap, not done | pre-extracted flow features |
 
 ## Local LLM
 
