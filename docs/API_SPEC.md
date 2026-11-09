@@ -234,6 +234,18 @@ trained-model evaluation results, not user-generated history.
 
 Standard status codes: `400` invalid input, `404` not found, `409` conflict (e.g. run already in progress), `500` internal error.
 
+## Model serving and operations (v0.5.0)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/predict` | body `{flow, model?, threshold?}` → `{model, score, is_anomaly, threshold, model_fingerprint}` |
+| `POST /api/predict/batch` | body `{flows[1..1000], model?, threshold?}` → `{results:[{score,is_anomaly}]}` |
+| `GET /health` | liveness; `status` is `ok` or `degraded` (models missing) |
+| `GET /ready` | `200` when models are loaded, else `503` |
+| `GET /metrics` | Prometheus exposition format |
+
+`flow` holds the 41 raw NSL-KDD fields. `score` is in [0,1]; 0.5 is the training-time threshold. See `docs/MLOPS.md`.
+
 ## Rate limiting
 
 Local single-user tool — no internal rate limiting needed. Outbound calls to free external APIs (NVD, crt.sh, VirusTotal) are throttled server-side to respect their published limits (see SECURITY.md and ENVIRONMENT.md).

@@ -30,6 +30,8 @@ B.Tech CSE (Cybersecurity), The NorthCap University.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,7 @@ _random_forest: Any | None = None
 _isolation_forest: Any | None = None
 _if_threshold: float | None = None
 _models_ready: bool = False
+_model_info: dict[str, Any] = {}
 
 
 # ─── Autoencoder definition must match the one in the training notebook ───────
@@ -92,7 +95,7 @@ def load_all_models() -> None:
     still work, only anomaly scoring will return an error).
     """
     global _autoencoder, _ae_threshold, _preprocessor, _raw_feature_cols, _feature_cols
-    global _random_forest, _isolation_forest, _if_threshold, _models_ready
+    global _random_forest, _isolation_forest, _if_threshold, _models_ready, _model_info
 
     if not CHECKPOINT_DIR.exists():
         logger.warning(
@@ -148,6 +151,7 @@ def load_all_models() -> None:
         _if_threshold = joblib.load(if_threshold_path)
         logger.info("Loaded IsolationForest (threshold=%.6f)", _if_threshold)
 
+        _model_info = _build_model_info()
         _models_ready = True
         logger.info("✓ All ZeroWatch models loaded and ready")
 
@@ -222,53 +226,85 @@ def get_if_threshold() -> float:
     return float(_if_threshold)
 
 
-def score_autoencoder(features: np.ndarray) -> float:
+def _build_model_info() -> dict[str, Any]:
     """
-    Compute normalised Autoencoder reconstruction error for a single flow.
-    Returns a score in [0, 1] where higher = more anomalous.
+    Version information for the loaded checkpoints: a short SHA-256 fingerprint
+    over every checkpoint file (so a deployed container can be tied to an exact
+    artifact set) plus the training metadata written by ml/scripts/train.py
+    (model_metadata.json: git sha, MLflow run id, seed, ...) when present.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(CHECKPOINT_DIR.glob("*")):
+        if path.suffix in {".pt", ".pkl"}:
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+    info: dict[str, Any] = {
+        "fingerprint": digest.hexdigest()[:12],
+        "n_features": len(_feature_cols or []),
+        "ae_threshold": float(_ae_threshold),
+        "if_threshold": float(_if_threshold),
+    }
+    meta_path = CHECKPOINT_DIR / "model_metadata.json"
+    if meta_path.exists():
+        try:
+            info["training"] = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            logger.warning("Could not parse %s", meta_path)
+    return info
 
-    features: 1-D numpy array of pre-scaled feature values, length == input_dim.
+
+def get_model_info() -> dict[str, Any]:
+    """Fingerprint + training metadata of the loaded models ({} if not loaded)."""
+    return dict(_model_info)
+
+
+def score_autoencoder_batch(features: np.ndarray) -> np.ndarray:
+    """
+    Normalised Autoencoder reconstruction error for n flows (features: (n, d)).
+    Returns shape (n,) in [0, 1]; 1.0 == at/above 2x the training-normal
+    95th-percentile threshold (the UI gauge never exceeds 100%).
     """
     ae = get_autoencoder()
     threshold = get_ae_threshold()
-
     with torch.no_grad():
-        x = torch.FloatTensor(features).unsqueeze(0)  # (1, input_dim)
-        recon = ae(x)
-        mse = float(torch.mean((x - recon) ** 2).item())
-
-    # Normalise relative to threshold so score == 1.0 means exactly at threshold
-    # Cap at 1.0 so the UI gauge never exceeds 100%
-    score = min(mse / (threshold * 2.0), 1.0)
-    return score
+        x = torch.as_tensor(np.atleast_2d(features), dtype=torch.float32)
+        mse = torch.mean((x - ae(x)) ** 2, dim=1).numpy()
+    return np.minimum(mse / (threshold * 2.0), 1.0)
 
 
-def score_isolation_forest(features: np.ndarray) -> float:
+def score_isolation_forest_batch(features: np.ndarray) -> np.ndarray:
     """
-    Compute IsolationForest anomaly score for a single flow, normalised to
-    [0, 1] using the same convention as score_autoencoder: score == 1.0 means
-    exactly at the 95th-percentile-of-training-normal threshold, capped at 1.0.
-
-    sklearn's score_samples() is "the lower, the more abnormal" — negated
-    here so higher raw values mean more anomalous, matching reconstruction
-    MSE's convention.
+    IsolationForest score for n flows, same normalisation as the autoencoder.
+    sklearn's score_samples() is "lower = more abnormal", so it is negated.
     """
     iso = get_isolation_forest()
     threshold = get_if_threshold()
+    raw = -iso.score_samples(np.atleast_2d(features))
+    return np.clip(raw / (threshold * 2.0), 0.0, 1.0)
 
-    raw = float(-iso.score_samples(features.reshape(1, -1))[0])
-    score = min(raw / (threshold * 2.0), 1.0)
-    return max(score, 0.0)
+
+def score_random_forest_batch(features: np.ndarray) -> np.ndarray:
+    """
+    Random Forest attack score 1 - P(Normal) for n flows. sklearn orders
+    predict_proba columns alphabetically (rf.classes_), so "Normal" is NOT
+    column 0 — look its index up rather than assuming it.
+    """
+    rf = get_random_forest()
+    proba = rf.predict_proba(np.atleast_2d(features))
+    normal_idx = list(rf.classes_).index("Normal")
+    return 1.0 - proba[:, normal_idx]
+
+
+def score_autoencoder(features: np.ndarray) -> float:
+    """Single-flow autoencoder score in [0, 1] (higher = more anomalous)."""
+    return float(score_autoencoder_batch(features.reshape(1, -1))[0])
+
+
+def score_isolation_forest(features: np.ndarray) -> float:
+    """Single-flow IsolationForest score in [0, 1] (higher = more anomalous)."""
+    return float(score_isolation_forest_batch(features.reshape(1, -1))[0])
 
 
 def score_random_forest(features: np.ndarray) -> float:
-    """
-    Random Forest attack score: 1 - P(Normal).
-
-    sklearn orders predict_proba columns alphabetically (rf.classes_), so
-    "Normal" is NOT column 0 — look its index up rather than assuming it.
-    """
-    rf = get_random_forest()
-    proba = rf.predict_proba(features.reshape(1, -1))[0]
-    normal_idx = list(rf.classes_).index("Normal")
-    return float(1.0 - proba[normal_idx])
+    """Single-flow Random Forest attack score, 1 - P(Normal)."""
+    return float(score_random_forest_batch(features.reshape(1, -1))[0])

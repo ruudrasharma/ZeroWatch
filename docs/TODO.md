@@ -73,11 +73,11 @@ Living list of remaining work, tracked against the build order from PRD.md/prior
 - [ ] Verify VirusTotal free-tier rate limit (4/min) doesn't stall the demo if multiple checks fire close together
 
 ## Phase 5 — MLOps (from the BrainMentors workshop; local-only, no Render deploy)
-- [ ] `GET /health` reporting models/Ollama readiness (Docker healthcheck currently probes `/dashboard/summary`)
-- [ ] `POST /api/predict` — validated single-flow scoring endpoint (score, verdict, SHAP) with Pydantic request/response models
-- [ ] MLflow: log params/metrics/artifacts from `ml/scripts/train.py`, register the Autoencoder versions, add an `mlflow` service to docker-compose
-- [ ] Prometheus `/metrics` (request count/latency, anomaly-score histogram, flagged-alert rate as a drift signal); optional Grafana service
-- [ ] CI: build the Docker images and smoke-test the container; push to Docker Hub
+- [x] `GET /health` reporting models/Ollama readiness (Docker healthcheck currently probes `/dashboard/summary`)
+- [x] `POST /api/predict` — validated single-flow scoring endpoint (score, verdict, SHAP) with Pydantic request/response models
+- [x] MLflow: log params/metrics/artifacts from `ml/scripts/train.py`, register the Autoencoder versions, add an `mlflow` service to docker-compose
+- [x] Prometheus `/metrics` (request count/latency, anomaly-score histogram, flagged-alert rate as a drift signal); optional Grafana service
+- [x] CI: build the Docker images and smoke-test the container; push to Docker Hub
 
 ## Stretch goals (only if core is done early)
 - [ ] Shodan integration for exposed service/port checks

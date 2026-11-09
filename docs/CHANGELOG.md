@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.0] — 2026-11-09 — MLOps integration
+
+### Added
+- Serving API: `POST /api/predict`, `POST /api/predict/batch`, `GET /health`, `GET /ready`;
+  vectorised batch scorers in `model_loader` (single-flow scorers now wrap them).
+- Prometheus `/metrics`, request-id middleware with JSON access logs, replay instrumentation.
+- MLflow tracking + registry with a mean-ROC-AUC promotion gate (`train.py --mlflow`),
+  `model_metadata.json`, checkpoint fingerprint.
+- Multi-stage non-root Dockerfile (CPU torch, HEALTHCHECK on `/ready`); compose `mlops` profile
+  (MLflow, Prometheus, Grafana with provisioned dashboard); CI Docker build + smoke test and opt-in Docker Hub push.
+- `docs/MLOPS.md`; 5 new API tests (21 total).
+
 ## [0.4.0] — 2026-11-09 — Preprocessing audit: leakage fix + backend bug fixes
 
 ### Fixed

@@ -237,3 +237,65 @@ def test_transform_flows_matches_model_input_dim():
     assert x.shape == (2, len(model_loader.get_feature_cols()))
     assert np.isfinite(x).all()
     assert 0.0 <= model_loader.score_autoencoder(x[0]) <= 1.0
+
+
+# ─── MLOps: health / readiness / predict / metrics ───────────────────────────
+_SAMPLE_FLOW = {
+    "duration": 0, "protocol_type": "tcp", "service": "http", "flag": "SF",
+    "src_bytes": 181, "dst_bytes": 5450, "land": 0, "wrong_fragment": 0, "urgent": 0,
+    "hot": 0, "num_failed_logins": 0, "logged_in": 1, "num_compromised": 0,
+    "root_shell": 0, "su_attempted": 0, "num_root": 0, "num_file_creations": 0,
+    "num_shells": 0, "num_access_files": 0, "num_outbound_cmds": 0, "is_host_login": 0,
+    "is_guest_login": 0, "count": 8, "srv_count": 8, "serror_rate": 0.0,
+    "srv_serror_rate": 0.0, "rerror_rate": 0.0, "srv_rerror_rate": 0.0,
+    "same_srv_rate": 1.0, "diff_srv_rate": 0.0, "srv_diff_host_rate": 0.0,
+    "dst_host_count": 9, "dst_host_srv_count": 9, "dst_host_same_srv_rate": 1.0,
+    "dst_host_diff_srv_rate": 0.0, "dst_host_same_src_port_rate": 0.11,
+    "dst_host_srv_diff_host_rate": 0.0, "dst_host_serror_rate": 0.0,
+    "dst_host_srv_serror_rate": 0.0, "dst_host_rerror_rate": 0.0,
+    "dst_host_srv_rerror_rate": 0.0,
+}
+
+
+def test_health_and_ready() -> None:
+    with TestClient(app) as c:
+        h = c.get("/health").json()
+        assert h["status"] == "ok" and h["models_loaded"] is True
+        assert h["model_fingerprint"]
+        assert c.get("/ready").status_code == 200
+
+
+def test_predict_all_models_return_unit_scores() -> None:
+    with TestClient(app) as c:
+        for model in ("autoencoder", "isolation_forest", "random_forest"):
+            r = c.post("/api/predict", json={"flow": _SAMPLE_FLOW, "model": model})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert 0.0 <= body["score"] <= 1.0
+            assert body["is_anomaly"] == (body["score"] >= body["threshold"])
+
+
+def test_predict_batch_matches_single() -> None:
+    with TestClient(app) as c:
+        one = c.post("/api/predict", json={"flow": _SAMPLE_FLOW}).json()["score"]
+        batch = c.post("/api/predict/batch", json={"flows": [_SAMPLE_FLOW] * 3}).json()
+        assert [r["score"] for r in batch["results"]] == [one] * 3
+
+
+def test_predict_rejects_bad_input() -> None:
+    with TestClient(app) as c:
+        assert c.post("/api/predict", json={"flow": {"duration": 1}}).status_code == 422
+        bad_model = c.post("/api/predict", json={"flow": _SAMPLE_FLOW, "model": "nope"})
+        assert bad_model.status_code == 400
+        assert c.post("/api/predict/batch", json={"flows": []}).status_code == 400
+
+
+def test_metrics_and_request_id() -> None:
+    with TestClient(app) as c:
+        r = c.get("/health", headers={"x-request-id": "abc123"})
+        assert r.headers["x-request-id"] == "abc123"
+        c.post("/api/predict", json={"flow": _SAMPLE_FLOW})
+        text = c.get("/metrics").text
+        assert "zerowatch_predictions_total" in text
+        assert "zerowatch_http_requests_total" in text
+        assert "zerowatch_models_loaded 1.0" in text

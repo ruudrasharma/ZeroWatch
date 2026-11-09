@@ -37,6 +37,9 @@ joblib==1.6.0          # checkpoints (scaler/label_encoders/RF) were saved with
                         # joblib.dump() — must be loaded with joblib.load(), not
                         # raw pickle.load(), or numpy array unpickling corrupts
 
+# ─── Monitoring (Prometheus /metrics) ────────────────────────────────────────
+prometheus-client>=0.21
+
 # ─── PDF export ───────────────────────────────────────────────────────────────
 reportlab==4.2.5
 # weasyprint==62.3  # optional heavier alternative (requires system libpango)
