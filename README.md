@@ -58,6 +58,9 @@ Open `http://localhost:3000`.
 
 Full setup, environment variables, and troubleshooting: see [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
+## MLOps
+Serving API (`/api/predict`, `/health`, `/ready`), MLflow tracking/registry, Prometheus + Grafana, Docker and CI — see [`docs/MLOPS.md`](docs/MLOPS.md).
+
 ## Documentation index
 
 | Document | Contents |

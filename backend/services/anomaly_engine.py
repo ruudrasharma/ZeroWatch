@@ -43,6 +43,7 @@ from fastapi import WebSocket
 from sqlalchemy.orm import Session
 
 from database import Alert, DetectionRun
+from services import metrics
 from services.model_loader import (
     get_feature_cols,
     get_raw_feature_cols,
@@ -318,6 +319,10 @@ async def replay_and_stream(
             # default, live-updatable via {"type":"set_threshold"}); severity is
             # just the display bucket for an already-flagged score.
             is_flagged = score >= current_threshold
+            metrics.REPLAY_FLOWS.labels(model_name).inc()
+            metrics.ANOMALY_SCORE.labels(model_name).observe(float(score))
+            if is_flagged:
+                metrics.REPLAY_ALERTS.labels(model_name).inc()
             severity = _severity_for_score(score) if is_flagged else None
             is_attack = true_label.upper() not in ("BENIGN", "NORMAL", "0")
 

@@ -85,6 +85,12 @@ def main() -> None:
     )
     parser.add_argument("--no-replay", action="store_true", help="Skip writing the replay CSV.")
     parser.add_argument(
+        "--mlflow", action="store_true",
+        help="Log the run to MLflow and register/promote the model (needs `pip install mlflow`).",
+    )
+    parser.add_argument("--mlflow-tracking-uri", default=None,
+                        help="MLflow tracking server URI (default: local ./mlruns).")
+    parser.add_argument(
         "--quick", action="store_true",
         help="Subsample the dataset + reduce epochs/estimators for a fast local smoke test.",
     )
@@ -135,6 +141,29 @@ def main() -> None:
     (out / "preprocessing_report.json").write_text(
         json.dumps(prod["preprocessing_report"], indent=2)
     )
+
+    import datetime
+    import subprocess
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:  # noqa: BLE001 — not a git checkout
+        git_sha = "unknown"
+    params = {
+        "seed": seed, "epochs": epochs, "rf_estimators": rf_estimators, "quick": args.quick,
+        "production_category": args.production_rf_category, "n_records": len(df),
+        "n_features": len(prod["feature_names"]), "git_sha": git_sha,
+    }
+    metadata = {**params, "trained_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "mlflow_run_id": None}
+    if args.mlflow:
+        from .tracking import log_training_run, register_production
+        (out / "model_metadata.json").write_text(json.dumps(metadata, indent=2))
+        run_id = log_training_run(out, params, results_df, auc_df, args.mlflow_tracking_uri)
+        metadata["mlflow_run_id"] = run_id
+        register_production(run_id, args.mlflow_tracking_uri)
+    (out / "model_metadata.json").write_text(json.dumps(metadata, indent=2))
 
     if not args.no_replay:
         n = export_replay_csv(prod, args.replay_output, seed)

@@ -76,3 +76,53 @@ jobs:
         env:
           NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api
           NEXT_PUBLIC_WS_BASE_URL: ws://localhost:8000/api
+
+  docker:
+    name: Docker (build + smoke test)
+    runs-on: ubuntu-latest
+    needs: [backend]
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          load: true
+          tags: zerowatch-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the container
+        run: |
+          docker run -d --name zw -p 8000:8000 zerowatch-backend:ci
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:8000/ready && break
+            sleep 3
+          done
+          curl -fs http://localhost:8000/health
+          curl -fs http://localhost:8000/metrics | grep -q zerowatch_models_loaded
+          docker logs zw | tail -20
+
+      # Opt-in: set repo secrets DOCKERHUB_USERNAME + DOCKERHUB_TOKEN to publish
+      # the image from main. Without them this job step is skipped.
+      - name: Log in to Docker Hub
+        if: github.ref == 'refs/heads/main' && env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push to Docker Hub
+        if: github.ref == 'refs/heads/main' && env.HAS_DOCKERHUB == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/zerowatch-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/zerowatch-backend:${{ github.sha }}
