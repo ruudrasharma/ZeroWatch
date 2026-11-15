@@ -6,8 +6,8 @@ CSL236 – Introduction to AI and Machine Learning, end-term project · B.Tech C
 
 | | |
 |---|---|
-| Live deployment | `https://<your-service>.onrender.com` (replace after deploying, see [Deploy](#deploy-render)) |
-| API docs | `<live-url>/docs` |
+| Live deployment | https://zerowatch.onrender.com |
+| API docs | https://zerowatch.onrender.com/docs |
 | Repository | https://github.com/ruudrasharma/ZeroWatch |
 
 ![ZeroWatch console, dark theme](docs/screenshots/ui-analyze-dark.png)
@@ -163,7 +163,7 @@ https://github.com/jmnwong/NSL-KDD-Dataset by [`data/download_data.py`](data/dow
 | `train` (KDDTrain+) | 121,242 | 80% fit, 20% validation (model selection) |
 | `test` (KDDTest+) | 21,494 | held-out; contains 17 attack types that never appear in `train` |
 
-The same pre-processed NSL-KDD data was used for the mid-term (`ml/notebooks/CSL236_MidTerm.ipynb`).
+The same pre-processed NSL-KDD data was used for the mid-term (`notebooks/CSL236_MidTerm.ipynb`).
 
 ## Data contract
 
@@ -235,7 +235,9 @@ ZeroWatch/
 ├── requirements.txt            # dev + training
 ├── requirements-serve.in       # the seven serving packages
 ├── requirements-serve.txt      # the same, locked with SHA-256 hashes (what Docker installs)
-└── backend/ frontend/ ml/ monitoring/   # extended local platform, see the end of this file
+├── docker-compose.yml          # the service + Prometheus, for a local stack
+├── monitoring/prometheus.yml
+└── notebooks/                  # CSL236 mid-term notebook and PDF
 ```
 
 ## Setup and run
@@ -261,6 +263,7 @@ LLM_BASE_URL=http://localhost:11434/v1 uvicorn app:app --port 8000   # copilot a
 ```bash
 docker build -t zerowatch .
 docker run -d -p 8000:8000 --restart unless-stopped zerowatch
+docker compose up --build        # the same service plus Prometheus on http://localhost:9090
 ```
 
 Image size: about 137 MB as reported by `docker image inspect` in CI (python:3.11-slim plus 7 serving
@@ -384,7 +387,6 @@ copilot with a stub LLM server and with none.
 `test` (install, lint with ruff including security rules, train a baseline model, pytest with a coverage
 floor and browser tests, drift check, dependency audit) → `docker` (build the image, start it, check
 `/health`, the UI and a 422) → `deploy` (calls the Render deploy hook; bonus: automated CD).
-The older Next.js/recon platform has its own workflow (`platform.yml`) that only runs when those folders change.
 
 ## Screenshots
 
@@ -425,73 +427,6 @@ Still to add before submission (they need your own machine and GitHub): `docs/sc
 | Bhavishyata Yadav | 24CSU036 | _fill in_ |
 | Bhavya Jain | 24CSU037 | _fill in_ |
 | Rudra Kumar Sharma | 24CSU175 | _fill in_ |
-
----
-
-## Extended platform (local only)
-
-`backend/`, `frontend/` and `ml/` hold the larger ZeroWatch platform that runs on localhost: a Next.js console,
-a web recon engine (TLS, headers, cookies, CVE lookup, subdomains) with reports written by a local LLM through
-Ollama, and a PyTorch autoencoder with leave-one-attack-family-out evaluation. It is not part of the graded
-pipeline above and is not deployed.
-
-### Tech stack
-
-| Layer | Technology |
-|---|---|
-| Frontend | Next.js 14 (App Router) + TypeScript, Tailwind, shadcn/ui, Recharts |
-| Backend | FastAPI (Python 3.11+), WebSockets |
-| ML | PyTorch (Autoencoder), scikit-learn (Isolation Forest, Random Forest), SHAP |
-| LLM | Ollama, running Llama 3.1 8B (or Mistral 7B on lower-spec machines) |
-| Database | SQLite |
-| External APIs (free tier) | NVD CVE API, crt.sh, VirusTotal free tier |
-
-### Deep-model training
-
-The actual model training and evaluation lives in [`ml/notebooks/ZeroWatch_Model_Training.ipynb`](ml/notebooks/ZeroWatch_Model_Training.ipynb) — built to run directly in **Google Colab** with no manual dataset upload. It trains the Autoencoder, Isolation Forest, and Random Forest baseline, runs the leave-one-attack-out zero-day evaluation, and generates SHAP explanations. See [`ml/README.md`](ml/README.md) for details.
-
-### Run the platform
-
-```bash
-# 1. Start the local LLM
-ollama serve
-ollama pull llama3.1:8b
-
-# 2. Start the backend
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-
-# 3. Start the frontend
-cd frontend
-npm install
-npm run dev
-```
-
-Open `http://localhost:3000`.
-
-Full setup, environment variables, and troubleshooting: see [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
-
-
-## Documentation index
-
-| Document | Contents |
-|---|---|
-| [PRD.md](docs/PRD.md) | Full product requirements and features |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, data flow, services |
-| [UI_UX_SPEC.md](docs/UI_UX_SPEC.md) | Screens, layout, components, design system |
-| [DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md) | Tables, relationships, indexes |
-| [API_SPEC.md](docs/API_SPEC.md) | Endpoints, request/response formats |
-| [SECURITY.md](docs/SECURITY.md) | Auth, encryption, validation, threat model |
-| [TECH_STACK.md](docs/TECH_STACK.md) | Exact frameworks, versions, libraries |
-| [USER_FLOWS.md](docs/USER_FLOWS.md) | Step-by-step user journeys |
-| [FEATURES.md](docs/FEATURES.md) | Feature-by-feature behavior spec |
-| [ENVIRONMENT.md](docs/ENVIRONMENT.md) | .env variables, local service setup |
-| [TESTING.md](docs/TESTING.md) | Unit, integration, E2E, security testing |
-| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Local run, Docker, CI/CD |
-| [CHANGELOG.md](docs/CHANGELOG.md) | Development history |
-| [TODO.md](docs/TODO.md) | Remaining work, known issues |
-
 
 ## License
 

@@ -1,7 +1,7 @@
 # Lint config for the graded pipeline (root files and tests). CI fails on any finding.
 line-length = 150
 target-version = "py311"
-extend-exclude = ["backend", "frontend", "ml", "*.ipynb"]
+extend-exclude = ["*.ipynb"]
 
 [lint]
 select = ["E", "F", "B", "I", "UP", "S"]

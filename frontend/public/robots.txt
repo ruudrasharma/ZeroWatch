@@ -1,3 +1,0 @@
-# ZeroWatch runs locally — no public crawling target.
-User-agent: *
-Disallow: /

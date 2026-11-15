@@ -20,8 +20,6 @@ env/
 # ─── Secrets — NEVER commit real .env files ───
 .env
 .env.local
-backend/.env
-frontend/.env.local
 
 # ─── Database (local state) ───
 *.db
@@ -31,20 +29,8 @@ frontend/.env.local
 # ─── Model checkpoints ───
 # Models are tracked in this repository for ease of setup.
 # Ensure file sizes do not exceed GitHub's 100MB limit.
-backend/models/checkpoints/*.h5
 
 # ─── Data / exports ───
-backend/data/raw/
-backend/data/processed/
-backend/data/exports/*.pdf
-
-# ─── Node / frontend ───
-node_modules/
-frontend/node_modules/
-.next/
-frontend/.next/
-out/
-frontend/out/
 
 # ─── OS / editor ───
 .DS_Store
