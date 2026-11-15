@@ -17,7 +17,7 @@ sqlalchemy==2.0.35
 httpx==0.27.2
 
 # ─── Environment ─────────────────────────────────────────────────────────────
-python-dotenv==1.0.1
+python-dotenv==1.2.4
 
 # ─── HTML parsing (for tech fingerprinting) ──────────────────────────────────
 beautifulsoup4==4.12.3
