@@ -1,0 +1,66 @@
+{
+  "features": [
+    "duration",
+    "protocol",
+    "service",
+    "state",
+    "src_bytes",
+    "dst_bytes"
+  ],
+  "results": [
+    {
+      "trained_on": "NSL-KDD",
+      "tested_on": "NSL-KDD",
+      "train_rows": 121242,
+      "test_rows": 21494,
+      "accuracy": 0.824,
+      "f1": 0.8196,
+      "roc_auc": 0.9664
+    },
+    {
+      "trained_on": "NSL-KDD",
+      "tested_on": "UNSW-NB15",
+      "train_rows": 121242,
+      "test_rows": 20597,
+      "accuracy": 0.4948,
+      "f1": 0.2277,
+      "roc_auc": 0.3842
+    },
+    {
+      "trained_on": "UNSW-NB15",
+      "tested_on": "NSL-KDD",
+      "train_rows": 61789,
+      "test_rows": 21494,
+      "accuracy": 0.4769,
+      "f1": 0.1624,
+      "roc_auc": 0.7266
+    },
+    {
+      "trained_on": "UNSW-NB15",
+      "tested_on": "UNSW-NB15",
+      "train_rows": 61789,
+      "test_rows": 20597,
+      "accuracy": 0.9058,
+      "f1": 0.9091,
+      "roc_auc": 0.9751
+    },
+    {
+      "trained_on": "Both",
+      "tested_on": "NSL-KDD",
+      "train_rows": 123578,
+      "test_rows": 21494,
+      "accuracy": 0.8161,
+      "f1": 0.8101,
+      "roc_auc": 0.9664
+    },
+    {
+      "trained_on": "Both",
+      "tested_on": "UNSW-NB15",
+      "train_rows": 123578,
+      "test_rows": 20597,
+      "accuracy": 0.904,
+      "f1": 0.9076,
+      "roc_auc": 0.9734
+    }
+  ]
+}

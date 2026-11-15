@@ -1,0 +1,12 @@
+# Render blueprint: New + > Blueprint > pick this repo. Free tier, Docker runtime.
+services:
+  - type: web
+    name: zerowatch
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: false   # deploys are triggered by CI (deploy hook) only after tests pass
+    envVars:
+      - key: RATE_LIMIT_PER_MIN
+        value: "300"

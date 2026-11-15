@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZeroWatch console</title>
+  <meta name="description" content="AI-based zero-day attack detection for network flows">
+  <script>
+    // set the theme before first paint so there is no flash
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("zw-theme"); } catch (e) {}
+      if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="top-row">
+      <div class="brand"><b>ZeroWatch</b><span>zero-day attack detection</span></div>
+      <nav class="tabs" role="tablist" aria-label="Views">
+        <button role="tab" data-view="analyze" aria-selected="true">Analyze a flow</button>
+        <button role="tab" data-view="live" aria-selected="false">Live traffic</button>
+        <button role="tab" data-view="capture" aria-selected="false">Capture</button>
+        <button role="tab" data-view="hunt" aria-selected="false">Hunt</button>
+        <button role="tab" data-view="assets" aria-selected="false">Assets</button>
+        <button role="tab" data-view="batch" aria-selected="false">Batch</button>
+        <button role="tab" data-view="model" aria-selected="false">Model</button>
+        <button role="tab" data-view="monitor" aria-selected="false">Monitoring</button>
+      </nav>
+      <div class="status">
+        <span id="health"><i class="dot"></i>connecting</span>
+        <button class="icon-btn" id="theme" aria-label="Switch colour theme">Light theme</button>
+      </div>
+    </div>
+    <div class="trace" aria-hidden="true">
+      <span class="trace-label">Risk of the last flows scored</span>
+      <div class="trace-bars" id="trace"></div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Analyze -->
+    <section id="view-analyze">
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Analyze a flow</h1>
+          <p>Describe one network connection. Two models score it: a classifier trained on known attacks, and a novelty model that only knows what normal traffic looks like.</p>
+        </div>
+      </div>
+      <div class="grid-2">
+        <form class="panel" id="flow-form" novalidate>
+          <h3>Start from an example</h3>
+          <div class="chips" id="presets" style="margin-top:10px"></div>
+          <div id="fieldsets"></div>
+          <div class="form-foot">
+            <button class="btn primary" type="submit" id="submit">Score this flow</button>
+            <button class="btn" type="button" id="break">Try an invalid value</button>
+            <span class="muted" id="form-note"></span>
+          </div>
+          <div id="form-error"></div>
+        </form>
+        <div class="panel result-sticky" id="result" aria-live="polite">
+          <div class="empty"><b>No flow scored yet</b>Pick an example on the left or fill in the fields, then score the flow.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live -->
+    <section id="view-live" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Live traffic</h1>
+          <p>Replays held-out flows the model never trained on, including 17 attack types that do not exist in the training data. The true label is shown next to each verdict.</p>
+        </div>
+        <button class="btn primary" id="live-toggle">Start replay</button>
+      </div>
+      <div class="stats" id="live-stats"></div>
+      <div class="panel table-wrap">
+        <table>
+          <thead><tr><th>Connection</th><th>True label</th><th>Seen in training</th><th>Verdict</th><th class="num">Risk</th><th>Outcome</th></tr></thead>
+          <tbody id="live-rows"><tr><td colspan="6" class="empty">Start the replay to stream flows through the model. Select a row to open it in Analyze.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Capture -->
+    <section id="view-capture" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Capture</h1>
+          <p>Score real traffic. A .pcap file is rebuilt into connections, each connection becomes a flow in the data contract, and every source is also judged on all of its flows together.</p>
+        </div>
+        <div class="form-foot" style="margin:0">
+          <button class="btn primary" id="cap-sample">Analyze the sample capture</button>
+          <label class="btn" for="cap-file">Choose a .pcap file</label>
+          <input type="file" id="cap-file" accept=".pcap,.cap" hidden>
+        </div>
+      </div>
+      <div id="cap-out"><div class="panel"><div class="empty"><b>No capture analyzed yet</b>Use the sample capture, or choose a classic .pcap file up to 5 MB. Record one with: tcpdump -w traffic.pcap -c 20000</div></div></div>
+    </section>
+
+    <!-- Assets -->
+    <section id="view-assets" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Assets</h1>
+          <p>Tell ZeroWatch what it is protecting. Each asset gets one passive exposure check (its HTTPS headers and TLS certificate). Alerts on the services it runs are then given a priority: the same attack ranks higher against an exposed asset.</p>
+        </div>
+      </div>
+      <form class="panel" id="asset-form">
+        <div class="fields" style="grid-template-columns: 1fr 2fr 1.4fr">
+          <div class="field"><label for="a-name">name</label><input id="a-name" required maxlength="40" placeholder="Public website"></div>
+          <div class="field"><label for="a-url">url</label><input id="a-url" required placeholder="https://example.org"></div>
+          <div class="field"><label for="a-services">services it runs</label><input id="a-services" required value="http, http_443" ><small>contract service names, comma separated</small></div>
+        </div>
+        <div class="form-foot"><button class="btn primary" type="submit" id="a-submit">Scan and register asset</button><span class="muted">Only public http/https hosts are scanned; internal addresses are refused.</span></div>
+        <div id="asset-error"></div>
+      </form>
+      <div id="asset-out"></div>
+    </section>
+
+    <!-- Hunt -->
+    <section id="view-hunt" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Hunt</h1>
+          <p>Possible zero-days from the log, grouped into campaigns. Each campaign gets a generated detection rule. Label a campaign, retrain, and the model learns it: a challenger is trained and replaces the live model only if it does better.</p>
+        </div>
+        <button class="btn" id="hunt-refresh">Refresh campaigns</button>
+      </div>
+      <div class="steps" id="hunt-steps"></div>
+      <div id="hunt-out"></div>
+    </section>
+
+    <!-- Batch -->
+    <section id="view-batch" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Batch scoring</h1>
+          <p>Paste CSV with a header row, or choose a CSV file. Up to 500 flows per request; every row must satisfy the data contract.</p>
+        </div>
+      </div>
+      <div class="panel">
+        <textarea id="batch-text" class="mono" spellcheck="false" aria-label="CSV input"></textarea>
+        <div class="form-foot">
+          <button class="btn primary" id="batch-run">Score all rows</button>
+          <button class="btn" id="batch-sample">Load 25 sample rows</button>
+          <input type="file" id="batch-file" accept=".csv,text/csv" aria-label="CSV file">
+          <button class="btn" id="batch-download" hidden>Download results as CSV</button>
+        </div>
+        <div id="batch-error"></div>
+      </div>
+      <div id="batch-out"></div>
+    </section>
+
+    <!-- Model -->
+    <section id="view-model" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Model</h1>
+          <p>What is deployed, how it was chosen, and how it performs on traffic it has never seen.</p>
+        </div>
+      </div>
+      <div id="model-out"></div>
+    </section>
+
+    <!-- Monitoring -->
+    <section id="view-monitor" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Monitoring</h1>
+          <p>Every scored flow is logged. Drift compares those logged inputs with the training data; a large shift means the model is being asked about traffic it was not trained on.</p>
+        </div>
+        <button class="btn" id="monitor-refresh">Refresh</button>
+      </div>
+      <div id="monitor-out"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="foot-version"></span>
+    <a href="/docs">API docs</a>
+    <a href="/metrics">Prometheus metrics</a>
+    <a href="/health">Health</a>
+    <span>NSL-KDD, University of New Brunswick</span>
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

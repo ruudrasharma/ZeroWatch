@@ -238,3 +238,42 @@ class WsSetThresholdMessage(BaseModel):
 
     type: str = "set_threshold"
     value: float
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MLOps — model serving (POST /api/predict, /api/predict/batch) and /health
+# ──────────────────────────────────────────────────────────────────────────────
+class PredictRequest(BaseModel):
+    """One raw NSL-KDD flow (the 41 raw columns, e.g. duration, protocol_type, ...)."""
+
+    flow: dict[str, float | int | str]
+    model: str = "autoencoder"
+    threshold: float = 0.5
+
+
+class PredictBatchRequest(BaseModel):
+    flows: list[dict[str, float | int | str]]
+    model: str = "autoencoder"
+    threshold: float = 0.5
+
+
+class PredictResponse(BaseModel):
+    model: str
+    score: float
+    is_anomaly: bool
+    threshold: float
+    model_fingerprint: str | None = None
+
+
+class PredictBatchResponse(BaseModel):
+    model: str
+    threshold: float
+    model_fingerprint: str | None = None
+    results: list[dict]
+
+
+class HealthResponse(BaseModel):
+    status: str
+    models_loaded: bool
+    model_fingerprint: str | None = None
+    version: str
