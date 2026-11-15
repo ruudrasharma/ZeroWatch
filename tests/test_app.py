@@ -772,3 +772,17 @@ def test_model_tab_data_is_present():
     c = ev["confusion"]
     assert c["tp"] + c["fp"] + c["fn"] + c["tn"] == 21494
     assert set(ev["family_recall"]) == {"DoS", "Probe", "R2L", "U2R"} and len(ev["roc"]) >= 10
+
+
+def test_public_host_without_tokens_is_not_open(monkeypatch):
+    """On Render with no keys configured, state-changing routes must stay locked, not open to everyone."""
+    monkeypatch.setattr(service, "ON_RENDER", True)
+    assert service.open_mode() is False
+    r = client.post("/learning/rollback", json={})
+    assert r.status_code in (401, 403, 422) and r.status_code != 200
+    assert client.get("/auth/whoami").json()["role"] == "viewer"
+    assert "strict-transport-security" in client.get("/health").headers
+
+
+def test_alert_limit_is_clamped():
+    assert len(client.get("/alerts?limit=100000").content) < 200_000
