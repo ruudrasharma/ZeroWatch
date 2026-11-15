@@ -4,7 +4,7 @@
 # ─── Web framework ────────────────────────────────────────────────────────────
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-python-multipart==0.0.9       # form data support
+python-multipart==0.0.33       # form data support
 
 # ─── Data validation ─────────────────────────────────────────────────────────
 pydantic>=2.9,<3       # 2.14.0b2+ required for Python 3.14 compatibility
