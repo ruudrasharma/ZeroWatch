@@ -14,4 +14,4 @@ pytest==9.2.0
 httpx==0.28.1
 pytest-cov==7.1.0
 ruff==0.17.5
-playwright==1.63.0   # browser smoke test of the UI (tests/test_ui.py); needs: playwright install chromium
+playwright==1.65.1   # browser smoke test of the UI (tests/test_ui.py); needs: playwright install chromium
