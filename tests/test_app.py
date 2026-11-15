@@ -258,7 +258,7 @@ def test_capture_endpoint_finds_scanner_and_flooder():
 def test_capture_rejects_garbage_and_oversize():
     h = {"content-type": "application/octet-stream"}
     assert client.post("/capture", content=b"this is not a pcap file at all", headers=h).status_code == 422
-    assert client.post("/capture", content=b"\x0a\x0d\x0d\x0a" + b"\x00" * 40, headers=h).status_code == 422  # pcapng
+    assert client.post("/capture", content=b"\x0a\x0d\x0d\x0a" + b"\x00" * 40, headers=h).status_code == 422  # empty pcapng
     assert client.post("/capture", content=b"\x00" * 5_000_001, headers=h).status_code == 413
 
 
@@ -330,3 +330,239 @@ def test_copilot_uses_llm_when_configured_and_rules_otherwise(monkeypatch):
     finally:
         srv.shutdown()
     assert client.post("/copilot", json={"question": "x"}).status_code == 422
+
+
+# ---- hardening: strict contract, access control, log integrity, operations ----
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clean_state():
+    """Each test starts with the shipped model and an empty rate-limit table."""
+    yield
+    service._hits.clear()
+    service._activate(0)
+
+
+def test_contract_is_strict_about_types():
+    for bad in ({"duration": "5"}, {"serror_rate": "0.5"}, {"count": True}, {"src_bytes": 1000.0},
+                {"logged_in": "1"}, {"protocol_type": 6}):
+        assert client.post("/predict", json=NORMAL | bad).status_code == 422, bad
+    assert client.post("/predict", json=NORMAL | {"serror_rate": 1}).status_code == 200  # an int is a valid rate
+
+
+def test_roles_gate_every_state_changing_route(monkeypatch):
+    monkeypatch.setattr(service, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(service, "ANALYST_TOKEN", "analyst-secret")
+    a, adm = {"x-api-key": "analyst-secret"}, {"x-api-key": "admin-secret"}
+    assert client.post("/predict", json=NORMAL).status_code == 200  # scoring stays open
+    assert client.get("/auth/whoami").json() == {"role": "viewer", "open_mode": False}
+    for method, path, body in [("post", "/learning/retrain", None), ("post", "/learning/rollback", {"generation": 0}),
+                               ("post", "/settings/threshold", {"threshold": 0.5}), ("post", "/monitoring/alarm/test", None),
+                               ("post", "/assets", {"name": "x", "url": "https://example.org", "services": ["http"]}),
+                               ("delete", "/assets/x", None)]:
+        assert client.request(method, path, json=body).status_code == 401, path
+        assert client.request(method, path, json=body, headers={"x-api-key": "wrong"}).status_code == 401, path
+        assert client.request(method, path, json=body, headers=a).status_code == 403, path
+    fb = {"request_id": "abcdef123456", "correct": True}
+    assert client.post("/feedback", json=fb).status_code == 401
+    assert client.post("/feedback", json=fb, headers=a).status_code == 200
+    assert client.post("/learning/rollback", json={"generation": 0}, headers=adm).status_code == 200
+    actions = [e["action"] for e in client.get("/audit/actions").json()["items"]]
+    assert "rollback" in actions and "feedback" in actions
+
+
+def test_rate_limit_cannot_be_bypassed_with_forwarded_header(monkeypatch):
+    monkeypatch.setattr(service, "RATE_LIMIT", 5)
+    service._hits.clear()
+    codes = [client.post("/predict", json=NORMAL, headers={"x-forwarded-for": f"1.2.3.{i}"}).status_code for i in range(9)]
+    assert codes[:5] == [200] * 5 and set(codes[5:]) == {429}
+    monkeypatch.setattr(service, "TRUST_PROXY", True)  # behind a proxy: the LAST hop is the client
+    service._hits.clear()
+    codes = [client.post("/predict", json=NORMAL, headers={"x-forwarded-for": f"9.9.9.{i}, 7.7.7.7"}).status_code
+             for i in range(7)]
+    assert codes.count(429) == 2
+
+
+def test_truncating_the_log_is_detected():
+    for _ in range(3):
+        client.post("/predict", json=NORMAL)
+    assert client.get("/audit/verify").json()["valid"] is True
+    original = service.LOG_FILE.read_text()
+    try:
+        service.LOG_FILE.write_text("\n".join(original.splitlines()[:-2]) + "\n")
+        bad = client.get("/audit/verify").json()
+        assert bad["valid"] is False and "removed from the end" in bad["detail"]
+    finally:
+        service.LOG_FILE.write_text(original)
+    assert client.get("/audit/verify").json()["valid"] is True
+
+
+def test_log_rotation_keeps_the_chain(tmp_path):
+    from store import ChainLog
+    log = ChainLog(tmp_path / "p.jsonl", max_bytes=300)
+    for i in range(12):
+        log.append({"n": i})
+    assert len(list(tmp_path.glob("p-*.jsonl"))) >= 1, "the log must have rotated"
+    assert log.verify()["valid"] is True
+    assert ChainLog(tmp_path / "p.jsonl", max_bytes=300).verify()["valid"] is True  # survives a restart
+
+
+def test_demo_traffic_is_tagged_and_kept_out_of_drift():
+    from drift_check import read_inputs
+    before = len(read_inputs(service.LOG_FILE, 10**6))
+    client.get("/simulate?n=20")
+    client.get("/capture/sample")
+    assert len(read_inputs(service.LOG_FILE, 10**6)) == before
+    client.post("/predict", json=NORMAL)
+    assert len(read_inputs(service.LOG_FILE, 10**6)) == before + 1
+    assert {e["source"] for e in service.read_log(400)} >= {"replay", "capture-sample", "api"}
+
+
+def test_only_one_retrain_at_a_time():
+    assert service._retrain_lock.acquire(blocking=False)
+    try:
+        assert client.post("/learning/retrain").status_code == 409
+    finally:
+        service._retrain_lock.release()
+
+
+def test_promoted_model_is_saved_and_can_be_rolled_back():
+    rows = [{"input": s["flow"], "label": "attack"} for s in service.SAMPLES["flows"]
+            if s["label"] != "normal" and not s["seen_in_training"]][:40]
+    service.LABEL_FILE.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    try:
+        report = client.post("/learning/retrain").json()
+        status = client.get("/learning/status").json()
+        if report["promoted"]:
+            gen = status["active"]
+            assert gen >= 1 and (service.REGISTRY.dir / f"detector-gen{gen}.joblib").exists()
+            service._activate(0)
+            service._restore_state()  # what happens on a restart
+            assert service.LEARNING["generation"] == gen
+            assert client.post("/learning/rollback", json={"generation": 0}).json()["active"] == 0
+            assert "learned" not in client.get("/health").json()["model_version"]
+            assert client.post("/learning/rollback", json={"generation": gen}).json()["active"] == gen
+        assert client.post("/learning/rollback", json={"generation": 999}).status_code == 404
+    finally:
+        service.LABEL_FILE.write_text("")
+        service.REGISTRY.activate(0)
+
+
+def test_wrong_verdict_feedback_and_triage_become_labels():
+    service.LABEL_FILE.write_text("")
+    rid = client.post("/predict", json=SYN_FLOOD).json()["request_id"]
+    r = client.post("/feedback", json={"request_id": rid, "correct": False}).json()
+    assert r["queued_for_retraining"] is True
+    assert service._read_labelled()[-1] == {"input": SYN_FLOOD, "label": "benign", "source": "feedback", "request_id": rid}
+    rid2 = client.post("/predict", json=SYN_FLOOD | {"count": 300}).json()["request_id"]
+    queue = client.get("/alerts").json()
+    assert any(a["request_id"] == rid2 and a["state"] == "new" for a in queue["items"])
+    assert client.patch(f"/alerts/{rid2}", json={"state": "confirmed", "assignee": "rudra"}).json()["state"] == "confirmed"
+    assert service._read_labelled()[-1]["label"] == "attack"
+    assert all(a["request_id"] != rid2 for a in client.get("/alerts").json()["items"])  # closed alerts leave the open queue
+    assert client.patch("/alerts/nope", json={"state": "confirmed"}).status_code == 404
+    assert client.patch(f"/alerts/{rid2}", json={"state": "deleted"}).status_code == 422
+    service.LABEL_FILE.write_text("")
+
+
+def test_rule_export_test_report_and_undo():
+    import random
+    random.seed(7)
+    service.LABEL_FILE.write_text("")
+    for _ in range(10):
+        client.get("/simulate?n=60")
+    found = client.get("/campaigns").json()["campaigns"]
+    assert found
+    cid = found[0]["id"]
+    rule = client.get(f"/campaigns/{cid}/rule")
+    assert rule.status_code == 200 and "detection:" in rule.text and "condition: selection" in rule.text
+    hits = client.get(f"/campaigns/{cid}/rule/test").json()
+    assert 0 < hits["matched"] <= hits["flows"]
+    report = client.get(f"/campaigns/{cid}/report").text
+    assert report.startswith("# Incident report") and found[0]["signature"]["rule"] in report
+    assert client.post(f"/campaigns/{cid}/label", json={"label": "attack"}).status_code == 200
+    after = client.get("/campaigns").json()
+    assert any(c["id"] == cid for c in after["labelled_campaigns"])
+    assert client.delete(f"/campaigns/{cid}/label").json()["removed"] == found[0]["size"]
+    assert client.delete(f"/campaigns/{cid}/label").status_code == 404
+    assert client.get("/campaigns/unknown/rule").status_code == 404
+
+
+def test_threshold_can_be_tuned_within_limits():
+    old = service.THRESHOLD
+    try:
+        p = client.post("/predict", json=SYN_FLOOD).json()["attack_probability"]
+        assert client.post("/settings/threshold", json={"threshold": 0.9}).json() == {"threshold": 0.9}
+        assert client.get("/model/info").json()["threshold"] == 0.9
+        assert (client.post("/predict", json=SYN_FLOOD).json()["verdict"] == "attack") == (p >= 0.9)
+        assert client.post("/settings/threshold", json={"threshold": 0.99}).status_code == 422
+        assert client.post("/settings/threshold", json={"threshold": "0.5"}).status_code == 422
+        assert len(client.get("/model/info").json()["threshold_curve"]) == 19
+    finally:
+        service.THRESHOLD = old
+
+
+def test_alarm_posts_to_the_webhook(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    got = []
+
+    class Hook(BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append(json.loads(self.rfile.read(int(self.headers["content-length"])))["text"])
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Hook)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("ALERT_WEBHOOK_URL", f"http://127.0.0.1:{srv.server_port}/hook")
+        assert client.post("/monitoring/alarm/test").json()["sent"] is True
+        assert got and got[0].startswith("ZeroWatch")
+        monkeypatch.setitem(service.ALARM, "chain_valid", True)
+        original = service.LOG_FILE.read_text()
+        try:  # break the chain: the timer check must raise the alarm once, not on every check
+            service.LOG_FILE.write_text("\n".join(original.splitlines()[:-1]) + "\n")
+            assert service.check_alarm()["sent"] is True and "BROKEN" in got[-1]
+            assert service.check_alarm()["sent"] is False
+        finally:
+            service.LOG_FILE.write_text(original)
+    finally:
+        srv.shutdown()
+
+
+def test_overview_summarises_the_service():
+    o = client.get("/overview").json()
+    assert o["flows"] > 0 and o["chain"]["valid"] is True and o["open_mode"] is True
+    assert set(o["model"]) == {"version", "generation", "threshold"} and "replay" in o["sources"]
+
+
+def test_pcapng_and_ipv6_are_parsed():
+    import socket
+    import struct
+
+    import pcap_flows
+
+    def tcp6(src, dst, sport, dport, flags):
+        seg = struct.pack("!HHIIBBHHH", sport, dport, 0, 0, 5 << 4, flags, 8192, 0, 0)
+        ip = struct.pack("!IHBB", 6 << 28, len(seg), 6, 64) + socket.inet_pton(socket.AF_INET6, src) + \
+            socket.inet_pton(socket.AF_INET6, dst) + seg
+        return b"\x00" * 12 + b"\x86\xdd" + ip
+
+    def block(btype, body):
+        body += b"\x00" * (-len(body) % 4)
+        n = 12 + len(body)
+        return struct.pack("<II", btype, n) + body + struct.pack("<I", n)
+
+    frames = [tcp6("2001:db8::1", "2001:db8::2", 40000, 443, 0x02), tcp6("2001:db8::2", "2001:db8::1", 443, 40000, 0x12)]
+    data = block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1)) + block(1, struct.pack("<HHI", 1, 0, 65535))
+    for i, f in enumerate(frames):
+        data += block(6, struct.pack("<IIIII", 0, 0, 1_000_000 + i * 1000, len(f), len(f)) + f)
+    pkts = pcap_flows.parse_pcap(data)
+    assert [(p["src"], p["dport"], p["flags"]) for p in pkts] == [("2001:db8::1", 443, 0x02), ("2001:db8::2", 40000, 0x12)]
+    flows = pcap_flows.to_flows(pcap_flows.connections(pkts))
+    assert len(flows) == 1 and flows[0]["flow"]["service"] == "http_443" and flows[0]["flow"]["flag"] == "S1"

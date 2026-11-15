@@ -28,7 +28,8 @@ if rows:
     max(rows, key=lambda x: x["val_f1"])["promoted"] = True  # same rule train.py uses
 Path("model/experiments.json").write_text(json.dumps(rows, indent=2))
 
-print("| Run | Algorithm | Hyperparameters | Val F1 | Test accuracy | Test F1 | Ensemble F1 | Ensemble FPR | Zero-day recall (detector -> ensemble) |")
+print("| Run | Algorithm | Hyperparameters | Val F1 | Test accuracy | Test F1 | Ensemble F1 | Ensemble FPR "
+      "| Zero-day recall (detector -> ensemble) |")
 print("|---|---|---|---|---|---|---|---|---|")
 for x in rows:
     star = " **(deployed)**" if x["promoted"] else ""

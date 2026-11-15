@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements-serve.txt .
 RUN pip install -r requirements-serve.txt
 
-COPY app.py features.py drift_check.py learning.py pcap_flows.py recon.py copilot.py ./
+COPY app.py features.py drift_check.py learning.py pcap_flows.py recon.py copilot.py ops.py store.py ./
 COPY model/ model/
 COPY static/ static/
 COPY data/sample_flows.json data/sample_capture.pcap data/
