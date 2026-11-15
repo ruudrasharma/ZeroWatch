@@ -1,0 +1,19 @@
+# Lint config for the graded pipeline (root files and tests). CI fails on any finding.
+line-length = 150
+target-version = "py311"
+extend-exclude = ["backend", "frontend", "ml", "*.ipynb"]
+
+[lint]
+select = ["E", "F", "B", "I", "UP", "S"]
+ignore = [
+    "S101",   # assert is how pytest works
+    "S311",   # random is used for sampling demo traffic, not for secrets
+    "S310",   # urllib targets are operator-configured (LLM, webhook) or pass recon.safe_target
+    "S301",   # joblib loads only models whose SHA-256 was verified first
+    "S603", "S607",  # fixed-argument subprocess calls (git sha, uvicorn in the UI test)
+    "S110",   # deliberate best-effort writes; the API must survive a read-only disk
+    "S104",   # binding 0.0.0.0 is required inside a container
+    "S108",
+    "B008",   # FastAPI Depends() in defaults is the framework's pattern
+    "E731",
+]

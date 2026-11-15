@@ -29,7 +29,10 @@ def read_inputs(path: Path, last: int = 2000) -> list[dict]:
     rows = []
     for line in path.read_text().splitlines()[-last:]:
         try:
-            rows.append(json.loads(line)["input"])
+            entry = json.loads(line)
+            if entry.get("source") in ("replay", "capture-sample"):
+                continue  # demo traffic must not look like drift
+            rows.append(entry["input"])
         except (ValueError, KeyError):
             continue
     return rows

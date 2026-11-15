@@ -93,19 +93,24 @@ def _signature(cluster: np.ndarray, normal: np.ndarray) -> dict:
             lo, hi = bounds.get((name, None), (None, None))
             thr = float(t.threshold[node])
             bounds[(name, None)] = (lo, thr) if went_left else (thr, hi)
-    conds = []
+    conds, structured = [], []
+
+    def add(name, op, value):
+        conds.append(f"{name} {op} {value}")
+        structured.append({"field": name, "op": op, "value": value})
+
     for (name, value), b in bounds.items():
         if value is not None:
-            conds.append(f"{name} {b} {value}")
+            add(name, b, value)
         else:
             lo, hi = b
-            fmt = (lambda v: f"{v:.2f}".rstrip("0").rstrip(".")) if name.endswith("_rate") else (lambda v: str(int(math.ceil(v))))
+            rate = name.endswith("_rate")
             if lo is not None:
-                conds.append(f"{name} > {fmt(lo)}" if name.endswith("_rate") else f"{name} >= {fmt(lo)}")
+                add(name, ">" if rate else ">=", round(lo, 2) if rate else int(math.ceil(lo)))
             if hi is not None:
-                conds.append(f"{name} <= {fmt(hi)}" if name.endswith("_rate") else f"{name} < {fmt(hi)}")
+                add(name, "<=" if rate else "<", round(hi, 2) if rate else int(math.ceil(hi)))
     hit = tree.apply(X) == leaf
-    return {"rule": " AND ".join(conds) or "no separating rule found",
+    return {"rule": " AND ".join(conds) or "no separating rule found", "conditions": structured,
             "coverage": round(float(hit[: len(Xc)].mean()), 3),          # share of the campaign the rule matches
             "false_match_rate": round(float(hit[len(Xc):].mean()), 4)}  # share of normal traffic it would also match
 
@@ -146,7 +151,7 @@ def find_campaigns(entries: list[dict], normal: np.ndarray) -> list[dict]:
             vals = [m["input"][name] for m in members]
             top = max(set(vals), key=vals.count)
             common[name] = {"value": top, "share": round(vals.count(top) / len(vals), 2)}
-        out.append({"id": hashlib.sha1(sig["rule"].encode()).hexdigest()[:10], "size": len(members),
+        out.append({"id": hashlib.sha256(sig["rule"].encode()).hexdigest()[:10], "size": len(members),
                     "mean_risk": round(sum(m["output"]["risk_score"] for m in members) / len(members)),
                     "signature": sig, "common": common,
                     "true_labels": dict(sorted(truth.items(), key=lambda kv: -kv[1])[:4]),

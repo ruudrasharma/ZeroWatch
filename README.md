@@ -91,6 +91,44 @@ Around the loop:
 
 ![Capture tab](docs/screenshots/ui-capture-dark.png)
 
+### Operating it safely
+
+- **Roles.** With `ANALYST_TOKEN` and `ADMIN_TOKEN` set, scoring stays open but every route that changes
+  state needs an `X-API-Key`: analysts can label, give feedback and triage; admins can also retrain, roll
+  back, change the threshold and manage assets. Without the tokens the service runs in open mode and the
+  Overview says so. Every such action is written to a second hash-chained log (`/audit/actions`).
+- **Strict contract.** The schema is in Pydantic strict mode: `"5"`, `true` and `1000.0` are not integers and
+  return 422, as do unknown categories, extra fields and NaN.
+- **Log integrity.** [`store.py`](store.py) chains every line to the previous one, keeps an anchor with the
+  expected length and head (so cutting lines off the end is detected, not only edits), and rotates the file at
+  5 MB without breaking the chain. The head is also on `/health` so an outside monitor can keep its own copy.
+- **Model versions.** A promoted challenger is saved to `logs/models/` with its hash, reloaded after a restart,
+  and any earlier version can be made live again from Hunt. Only one retrain runs at a time.
+- **Alert queue.** Everything not passed as benign, ordered by priority, with a triage state. Closing an alert
+  as confirmed or as a false alarm labels the flow, and "No" on the verdict feedback does the same, so analyst
+  decisions reach the next retrain.
+- **Rules and reports.** Each campaign's rule can be downloaded in Sigma format, tested against the log, and
+  packaged with an incident report in Markdown.
+- **Threshold.** The Model tab shows catch rate against false alarms for every threshold and lets an admin
+  apply one; the change is audited and survives a restart.
+- **Alarm.** Every 5 minutes drift and both log chains are checked. When drift appears or a chain breaks, one
+  message goes to `ALERT_WEBHOOK_URL` (Slack-style webhook). Replayed and sample traffic is tagged and left out
+  of drift, so a demo cannot raise the alarm.
+- **Client address.** `X-Forwarded-For` is ignored unless `TRUST_PROXY=1`, and then only its last hop is used,
+  so the rate limit cannot be bypassed by sending a fake header.
+- **Model pin.** `MODEL_SHA256` in the environment outranks `model/model.sha256`.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ANALYST_TOKEN`, `ADMIN_TOKEN` | API keys for the two roles | unset (open mode) |
+| `TRUST_PROXY` | believe the last `X-Forwarded-For` hop | `0` |
+| `RATE_LIMIT_PER_MIN` | scoring requests per client per minute | `600` |
+| `MODEL_SHA256` | expected hash of `model/model.joblib` | from `model.sha256` |
+| `ALERT_WEBHOOK_URL`, `ALARM_INTERVAL_SECONDS` | alarm destination and period | unset, `300` |
+| `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | copilot model | unset (rules) |
+| `RECON_ENABLED` | allow asset scans | `1` |
+| `LOG_DIR`, `LOG_MAX_BYTES` | where logs and saved models go; rotation size | `logs`, 5 MB |
+
 ## Dataset
 
 **NSL-KDD** (Canadian Institute for Cybersecurity, University of New Brunswick):
@@ -150,7 +188,8 @@ ZeroWatch/
 │   ├── train_cache.npz         # compact training data so the service can retrain a challenger
 │   └── experiments.json        # MLflow runs exported for the UI
 ├── static/                     # index.html, styles.css, app.js (console UI, light + dark)
-├── tests/test_app.py           # 27 pytest tests
+├── tests/test_app.py           # 41 API tests
+├── tests/test_ui.py            # 5 browser tests of the console (Playwright)
 ├── logs/sample_predictions.jsonl
 ├── .github/workflows/ci.yml    # install -> train -> pytest -> docker smoke test -> deploy
 ├── app.py                      # FastAPI app + Pydantic schema
@@ -161,6 +200,8 @@ ZeroWatch/
 ├── recon.py                    # passive asset exposure scan with SSRF guard
 ├── copilot.py                  # analyst Q&A: LLM if configured, rules otherwise
 ├── cross_dataset.py            # NSL-KDD <-> UNSW-NB15 generalisation test
+├── store.py                    # hash-chained, rotating log with truncation detection
+├── ops.py                      # Sigma export, incident report, model version registry, webhook
 ├── drift_check.py              # drift check on logged inputs (bonus)
 ├── export_experiments.py       # MLflow runs -> README table / UI
 ├── run_experiments.sh          # the 7 tracked runs
@@ -182,7 +223,8 @@ python train.py --n_estimators 100 --max_depth 6      # one tracked run
 ./run_experiments.sh                                   # all 7 runs; best one is saved to model/model.joblib
 mlflow ui --backend-store-uri sqlite:///mlflow.db      # http://localhost:5000
 uvicorn app:app --reload --port 8000                   # UI at http://localhost:8000, API docs at /docs
-pytest -v --tb=short
+pytest -v --tb=short                                   # add: playwright install chromium, for the browser tests
+ruff check .
 python drift_check.py                                  # compare logs/predictions.jsonl with training data
 python cross_dataset.py                                # NSL-KDD <-> UNSW-NB15 (downloads 32 MB on first run)
 LLM_BASE_URL=http://localhost:11434/v1 uvicorn app:app --port 8000   # copilot answers with Ollama
@@ -260,6 +302,10 @@ Run 7 is also registered in the MLflow Model Registry as `zerowatch-detector` wi
 | `POST /capture`, `GET /capture/sample` | Score a `.pcap`: flows, verdicts and the host graph |
 | `POST /assets`, `GET /assets`, `DELETE /assets/{name}` | Register an asset and scan its exposure |
 | `POST /copilot` | Ask a question about the scored traffic |
+| `GET /overview`, `GET /alerts`, `PATCH /alerts/{id}` | Dashboard summary; triage queue |
+| `GET /campaigns/{id}/rule`, `/rule/test`, `/report` | Sigma rule, its hits on the log, incident report |
+| `GET /learning/status`, `POST /learning/rollback` | Saved model versions; make one live |
+| `POST /settings/threshold`, `POST /monitoring/alarm/test`, `GET /audit/actions` | Admin settings, alarm, action log |
 | `GET /simulate` | Replay labelled held-out flows through the model |
 | `GET /model/info`, `GET /contract` | Model card and the data contract |
 | `GET /monitoring/drift`, `GET /monitoring/recent` | Drift report and latest logged predictions |
@@ -285,7 +331,9 @@ What the service adds on top of a plain prediction:
 
 ## Tests
 
-`pytest -v --tb=short` runs 27 tests in `tests/test_app.py`, including the four required ones:
+`pytest -v --tb=short` runs 46 tests: 41 against the API in `tests/test_app.py` and 5 that drive the console
+in a real browser in `tests/test_ui.py` (skipped if Playwright's Chromium is not installed). Coverage of the
+serving code is 88% and CI fails below 85%. The four required tests:
 
 | Required test | Test |
 |---|---|
@@ -303,7 +351,8 @@ copilot with a stub LLM server and with none.
 ## CI/CD
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main`:
-`test` (install, train a baseline model, pytest, drift check, dependency audit) → `docker` (build the image, start it, check
+`test` (install, lint with ruff including security rules, train a baseline model, pytest with a coverage
+floor and browser tests, drift check, dependency audit) → `docker` (build the image, start it, check
 `/health`, the UI and a 422) → `deploy` (calls the Render deploy hook; bonus: automated CD).
 The older Next.js/recon platform has its own workflow (`platform.yml`) that only runs when those folders change.
 
@@ -315,6 +364,7 @@ The older Next.js/recon platform has its own workflow (`platform.yml`) that only
 | Live replay ![live](docs/screenshots/ui-live-dark.png) | Model tab ![model](docs/screenshots/ui-model-light.png) |
 | Monitoring and drift ![monitoring](docs/screenshots/ui-monitoring-dark.png) | `/docs` ![docs](docs/screenshots/api-docs.png) |
 | Hunt: campaigns and generated rules ![hunt](docs/screenshots/ui-hunt-campaigns.png) | Assets ![assets](docs/screenshots/ui-assets.png) |
+| Overview ![overview](docs/screenshots/ui-overview-dark.png) | Alert queue ![queue](docs/screenshots/ui-queue-dark.png) |
 
 Still to add before submission (they need your own machine and GitHub): `docs/screenshots/mlflow-ui.png`,
 `docs/screenshots/pytest.png`, `docs/screenshots/ci-green.png`.
@@ -326,8 +376,9 @@ Still to add before submission (they need your own machine and GitHub): `docs/sc
 - Content-based attacks (R2L such as password guessing, `snmpguess`) look like normal flows in these 20
   features and are often missed by both models.
 - The novelty model's 5% false-positive budget is too high for a real SOC without a second triage stage.
-- A promoted challenger lives in memory. Restarting the container goes back to `model/model.joblib`; making
-  it permanent means running `train.py` with the labelled flows and committing the result.
+- Promoted models are saved under `logs/models/`. On Render's free tier that disk is wiped on every deploy,
+  so a learned model survives restarts but not redeploys; a persistent disk or object storage would fix that.
+- State (labels, alert states, assets) is kept in JSON files and one process. Two instances would not share it.
 - Campaigns from a small log can mix attack and normal flows, and their rules then match too much normal
   traffic. The UI shows the rule's false-match rate so this is visible before labelling.
 - The conformal guarantee assumes live traffic resembles validation traffic. On shifted traffic such as

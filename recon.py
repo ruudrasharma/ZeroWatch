@@ -20,7 +20,7 @@ import ipaddress
 import socket
 import ssl
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 TIMEOUT = 6
@@ -97,9 +97,9 @@ def scan(url: str) -> dict:
             raw = socket.create_connection((ip, port), timeout=TIMEOUT)  # connect to the address we validated
             sock = ctx.wrap_socket(raw, server_hostname=host)
             cert = sock.getpeercert()
-            expires = datetime.fromtimestamp(ssl.cert_time_to_seconds(cert["notAfter"]), timezone.utc)
+            expires = datetime.fromtimestamp(ssl.cert_time_to_seconds(cert["notAfter"]), UTC)
             tls = {"version": sock.version(), "expires": expires.date().isoformat(),
-                   "days_left": (expires - datetime.now(timezone.utc)).days}
+                   "days_left": (expires - datetime.now(UTC)).days}
             conn = http.client.HTTPSConnection(host, port, timeout=TIMEOUT, context=ctx)
             conn.sock = sock
         else:
