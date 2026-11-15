@@ -83,3 +83,9 @@ logs/feedback.jsonl
 data/UNSW_NB15*.csv
 logs/labelled.jsonl
 logs/assets.json
+
+# runtime state written by the service
+logs/*.json
+logs/audit.jsonl
+logs/predictions-*.jsonl
+logs/models/

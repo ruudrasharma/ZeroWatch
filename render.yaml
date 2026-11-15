@@ -10,3 +10,9 @@ services:
     envVars:
       - key: RATE_LIMIT_PER_MIN
         value: "300"
+      - key: TRUST_PROXY          # Render's proxy sets X-Forwarded-For; needed for per-client rate limits
+        value: "1"
+      - key: ANALYST_TOKEN        # labelling and triage; copy the generated value from the Render dashboard
+        generateValue: true
+      - key: ADMIN_TOKEN          # retrain, rollback, assets, threshold
+        generateValue: true

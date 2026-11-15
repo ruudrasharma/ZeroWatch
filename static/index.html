@@ -24,29 +24,64 @@
     <div class="top-row">
       <div class="brand"><b>ZeroWatch</b><span>zero-day attack detection</span></div>
       <nav class="tabs" role="tablist" aria-label="Views">
-        <button role="tab" data-view="analyze" aria-selected="true">Analyze a flow</button>
-        <button role="tab" data-view="live" aria-selected="false">Live traffic</button>
-        <button role="tab" data-view="capture" aria-selected="false">Capture</button>
-        <button role="tab" data-view="hunt" aria-selected="false">Hunt</button>
-        <button role="tab" data-view="assets" aria-selected="false">Assets</button>
-        <button role="tab" data-view="batch" aria-selected="false">Batch</button>
-        <button role="tab" data-view="model" aria-selected="false">Model</button>
-        <button role="tab" data-view="monitor" aria-selected="false">Monitoring</button>
+        <button role="tab" id="tab-overview" aria-controls="view-overview" data-view="overview" aria-selected="false">Overview</button>
+        <button role="tab" id="tab-analyze" aria-controls="view-analyze" data-view="analyze" aria-selected="true">Analyze a flow</button>
+        <button role="tab" id="tab-live" aria-controls="view-live" data-view="live" aria-selected="false">Live traffic</button>
+        <button role="tab" id="tab-capture" aria-controls="view-capture" data-view="capture" aria-selected="false">Capture</button>
+        <button role="tab" id="tab-queue" aria-controls="view-queue" data-view="queue" aria-selected="false">Queue</button>
+        <button role="tab" id="tab-hunt" aria-controls="view-hunt" data-view="hunt" aria-selected="false">Hunt</button>
+        <button role="tab" id="tab-assets" aria-controls="view-assets" data-view="assets" aria-selected="false">Assets</button>
+        <button role="tab" id="tab-batch" aria-controls="view-batch" data-view="batch" aria-selected="false">Batch</button>
+        <button role="tab" id="tab-model" aria-controls="view-model" data-view="model" aria-selected="false">Model</button>
+        <button role="tab" id="tab-monitor" aria-controls="view-monitor" data-view="monitor" aria-selected="false">Monitoring</button>
       </nav>
       <div class="status">
         <span id="health"><i class="dot"></i>connecting</span>
+        <button class="icon-btn" id="auth-btn" aria-expanded="false" aria-controls="auth-pop">Sign in</button>
         <button class="icon-btn" id="theme" aria-label="Switch colour theme">Light theme</button>
       </div>
     </div>
+    <form class="auth-pop" id="auth-pop" hidden>
+      <label for="auth-key">API key</label>
+      <input id="auth-key" type="password" autocomplete="off" placeholder="Analyst or admin key">
+      <button class="btn primary">Use this key</button>
+      <button class="btn" type="button" id="auth-clear">Sign out</button>
+      <p class="note" id="auth-note"></p>
+    </form>
     <div class="trace" aria-hidden="true">
       <span class="trace-label">Risk of the last flows scored</span>
       <div class="trace-bars" id="trace"></div>
+      <span class="trace-key"><i class="benign"></i>benign <i class="uncertain"></i>review <i class="zero_day_suspect"></i>zero-day <i class="attack"></i>attack</span>
     </div>
   </header>
 
   <main>
+    <!-- Overview -->
+    <section id="view-overview" role="tabpanel" aria-labelledby="tab-overview" tabindex="-1" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Overview</h1>
+          <p>Where things stand right now: what needs attention, whether the model and its log can be trusted, and what to do next.</p>
+        </div>
+        <button class="btn" id="overview-refresh">Refresh</button>
+      </div>
+      <div id="overview-out"></div>
+    </section>
+
+    <!-- Queue -->
+    <section id="view-queue" role="tabpanel" aria-labelledby="tab-queue" tabindex="-1" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Alert queue</h1>
+          <p>Every flow that was not passed as benign, highest priority first. Closing an alert as confirmed or as a false alarm also labels the flow for the next retrain.</p>
+        </div>
+        <div class="chips" id="queue-filter"></div>
+      </div>
+      <div id="queue-out"></div>
+    </section>
+
     <!-- Analyze -->
-    <section id="view-analyze">
+    <section id="view-analyze" role="tabpanel" aria-labelledby="tab-analyze" tabindex="-1">
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Analyze a flow</h1>
@@ -72,7 +107,7 @@
     </section>
 
     <!-- Live -->
-    <section id="view-live" hidden>
+    <section id="view-live" role="tabpanel" aria-labelledby="tab-live" tabindex="-1" hidden>
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Live traffic</h1>
@@ -90,7 +125,7 @@
     </section>
 
     <!-- Capture -->
-    <section id="view-capture" hidden>
+    <section id="view-capture" role="tabpanel" aria-labelledby="tab-capture" tabindex="-1" hidden>
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Capture</h1>
@@ -106,7 +141,7 @@
     </section>
 
     <!-- Assets -->
-    <section id="view-assets" hidden>
+    <section id="view-assets" role="tabpanel" aria-labelledby="tab-assets" tabindex="-1" hidden>
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Assets</h1>
@@ -126,7 +161,7 @@
     </section>
 
     <!-- Hunt -->
-    <section id="view-hunt" hidden>
+    <section id="view-hunt" role="tabpanel" aria-labelledby="tab-hunt" tabindex="-1" hidden>
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Hunt</h1>
@@ -139,7 +174,7 @@
     </section>
 
     <!-- Batch -->
-    <section id="view-batch" hidden>
+    <section id="view-batch" role="tabpanel" aria-labelledby="tab-batch" tabindex="-1" hidden>
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Batch scoring</h1>
@@ -160,7 +195,7 @@
     </section>
 
     <!-- Model -->
-    <section id="view-model" hidden>
+    <section id="view-model" role="tabpanel" aria-labelledby="tab-model" tabindex="-1" hidden>
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Model</h1>
@@ -171,7 +206,7 @@
     </section>
 
     <!-- Monitoring -->
-    <section id="view-monitor" hidden>
+    <section id="view-monitor" role="tabpanel" aria-labelledby="tab-monitor" tabindex="-1" hidden>
       <div class="view-head">
         <div>
           <h1 style="font-size:1.6rem">Monitoring</h1>
@@ -183,6 +218,7 @@
     </section>
   </main>
 
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <footer>
     <span id="foot-version"></span>
     <a href="/docs">API docs</a>

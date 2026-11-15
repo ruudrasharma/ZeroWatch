@@ -24,7 +24,7 @@ def session(t, c, server, port, up, down):
                (t + .11, server, c, "tcp", port, sp, FA, 0)])
 
 
-for i in range(90):                                   # normal users
+for _ in range(90):                                   # normal users
     c, t = f"10.0.0.{rng.randint(100, 120)}", rng.uniform(0, 30)
     kind = rng.random()
     if kind < 0.6:

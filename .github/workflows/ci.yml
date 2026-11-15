@@ -23,11 +23,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Lint (ruff, includes security rules)
+        run: ruff check .
+
       - name: Train a baseline model (logged to MLflow)
         run: python train.py --n_estimators 100 --max_depth 6 --force
 
+      - name: Install the browser for the UI smoke test
+        run: playwright install --with-deps chromium
+
+      # API tests + browser tests of the console; the build fails under 85% coverage
       - name: Run tests
-        run: pytest -v --tb=short
+        run: pytest -v --tb=short --cov=app --cov=learning --cov=store --cov=ops --cov=recon --cov=copilot --cov=pcap_flows --cov=drift_check --cov=features --cov-fail-under=85
 
       # informational: the sample log is an attack-heavy replay, so drift is expected
       - name: Drift check on the sample log
