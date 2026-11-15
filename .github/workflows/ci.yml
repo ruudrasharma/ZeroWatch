@@ -1,60 +1,78 @@
 name: CI
 
-# Verification only — no deploy job, per DEPLOYMENT.md §4. Keeps `main` in a
-# known-good, demo-ready state.
+# Stage 7: on every push to main -> install, train a baseline model, run pytest.
+# Then build the Docker image and smoke-test it; if all of that is green and a
+# Render deploy hook is configured, deploy (CD).
 on:
   push:
     branches: [main]
   pull_request:
 
 jobs:
-  backend:
-    name: Backend (lint + test)
+  test:
+    name: Install, train, test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: backend/requirements.txt
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Ruff
-        run: ruff check .
+      - name: Train a baseline model (logged to MLflow)
+        run: python train.py --n_estimators 100 --max_depth 6 --force
 
-      - name: Pytest
-        run: pytest -q
+      - name: Run tests
+        run: pytest -v --tb=short
 
-  frontend:
-    name: Frontend (lint + build)
+      # informational: the sample log is an attack-heavy replay, so drift is expected
+      - name: Drift check on the sample log
+        run: python drift_check.py --log logs/sample_predictions.jsonl || echo "drift reported (exit 1 is the retraining alarm)"
+
+      # supply-chain check on what the container actually installs; reported, not blocking,
+      # so a newly published advisory cannot turn the build red on demo day
+      - name: Audit serving dependencies
+        continue-on-error: true
+        run: pip install pip-audit && pip-audit -r requirements-serve.txt
+
+  docker:
+    name: Docker build + smoke test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
+    needs: test
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
+      - name: Build image
+        run: docker build -t zerowatch .
 
-      - name: Install dependencies
-        run: npm install
+      - name: Smoke test the container
+        run: |
+          docker run -d --name zw -p 8000:8000 --restart unless-stopped zerowatch
+          for i in $(seq 1 20); do curl -fs http://localhost:8000/health && break; sleep 2; done
+          curl -fs http://localhost:8000/health
+          curl -fs http://localhost:8000/ | grep -q ZeroWatch
+          # an out-of-contract input must be a 422
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/predict \
+            -H 'content-type: application/json' -d '{"duration": -1}')
+          test "$code" = "422"
+          docker image inspect zerowatch --format 'image size: {{.Size}} bytes'
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Build
-        run: npm run build
-        env:
-          NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api
-          NEXT_PUBLIC_WS_BASE_URL: ws://localhost:8000/api
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: [test, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - name: Trigger deploy hook
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL secret not set - skipping deploy"
+          else
+            curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
+          fi

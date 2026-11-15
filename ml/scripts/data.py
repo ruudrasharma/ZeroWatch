@@ -84,4 +84,9 @@ def load_nsl_kdd() -> pd.DataFrame:
     df["label"] = df["label"].str.strip()
     df["attack_category"] = df["label"].map(ATTACK_MAP)
     df["attack_category"] = df["attack_category"].fillna("Other")
+
+    # KDDTrain+ and KDDTest+ overlap (~600 identical rows). Left in, an identical
+    # row can land in both our random train and test splits — a quiet form of
+    # leakage — so exact duplicates are dropped before any splitting.
+    df = df.drop_duplicates().reset_index(drop=True)
     return df

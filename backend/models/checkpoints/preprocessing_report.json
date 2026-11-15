@@ -1,0 +1,76 @@
+{
+  "n_raw_columns": 41,
+  "n_after_encoding_before_selection": 117,
+  "n_final_features": 111,
+  "nominal_cols": [
+    "protocol_type",
+    "service",
+    "flag"
+  ],
+  "binary_cols": [
+    "land",
+    "logged_in",
+    "root_shell",
+    "is_host_login",
+    "is_guest_login"
+  ],
+  "log1p_cols": [
+    "duration",
+    "src_bytes",
+    "dst_bytes",
+    "wrong_fragment",
+    "urgent",
+    "hot",
+    "num_failed_logins",
+    "num_compromised",
+    "su_attempted",
+    "num_root",
+    "num_file_creations",
+    "num_shells",
+    "num_access_files",
+    "count",
+    "srv_count"
+  ],
+  "scaled_only_cols": [
+    "serror_rate",
+    "rerror_rate",
+    "same_srv_rate",
+    "diff_srv_rate",
+    "srv_diff_host_rate",
+    "dst_host_count",
+    "dst_host_srv_count",
+    "dst_host_same_srv_rate",
+    "dst_host_diff_srv_rate",
+    "dst_host_same_src_port_rate",
+    "dst_host_srv_diff_host_rate",
+    "dst_host_rerror_rate"
+  ],
+  "dropped_constant": [
+    "num_outbound_cmds"
+  ],
+  "dropped_correlated": {
+    "srv_serror_rate": {
+      "correlated_with": "serror_rate",
+      "abs_corr": 0.9957
+    },
+    "srv_rerror_rate": {
+      "correlated_with": "rerror_rate",
+      "abs_corr": 0.994
+    },
+    "dst_host_serror_rate": {
+      "correlated_with": "serror_rate",
+      "abs_corr": 0.9786
+    },
+    "dst_host_srv_serror_rate": {
+      "correlated_with": "serror_rate",
+      "abs_corr": 0.9814
+    },
+    "dst_host_srv_rerror_rate": {
+      "correlated_with": "rerror_rate",
+      "abs_corr": 0.9597
+    }
+  },
+  "skew_threshold": 1.0,
+  "corr_threshold": 0.95,
+  "n_train_rows": 110863
+}

@@ -66,3 +66,20 @@ htmlcov/
 
 # ─── Jupyter checkpoints ───
 .ipynb_checkpoints/
+
+# MLflow store. Run ./run_experiments.sh to create mlflow.db locally; it is kept out of git
+# because GitHub push protection flags random strings inside the binary as API keys.
+mlruns/
+mlflow.db
+
+# Raw NSL-KDD downloads (data/nsl_kdd.csv is the committed, processed file)
+data/KDD*.txt
+
+# Live prediction logs (a sample is committed as logs/sample_predictions.jsonl)
+logs/predictions.jsonl
+logs/feedback.jsonl
+
+# UNSW-NB15 (32 MB) is downloaded by cross_dataset.py
+data/UNSW_NB15*.csv
+logs/labelled.jsonl
+logs/assets.json
