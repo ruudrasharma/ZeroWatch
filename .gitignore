@@ -25,7 +25,6 @@ frontend/.env.local
 
 # ─── Database (local state) ───
 *.db
-!mlflow.db
 *.sqlite
 *.sqlite3
 
@@ -68,8 +67,10 @@ htmlcov/
 # ─── Jupyter checkpoints ───
 .ipynb_checkpoints/
 
-# MLflow artifacts (mlflow.db itself is committed so the run history can be opened)
+# MLflow store. Run ./run_experiments.sh to create mlflow.db locally; it is kept out of git
+# because GitHub push protection flags random strings inside the binary as API keys.
 mlruns/
+mlflow.db
 
 # Raw NSL-KDD downloads (data/nsl_kdd.csv is the committed, processed file)
 data/KDD*.txt
