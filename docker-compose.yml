@@ -1,96 +1,29 @@
-# ZeroWatch — one-command local run, per DEPLOYMENT.md §2.
-#
-# First time:
-#   cp backend/.env.example backend/.env        # fill in VIRUSTOTAL_API_KEY at minimum
-#   cp frontend/.env.local.example frontend/.env.local
+# Local stack: the ZeroWatch service plus Prometheus scraping its metrics.
 #   docker compose up --build
-#   docker exec -it $(docker compose ps -q ollama) ollama pull llama3.1:8b
-#
-# Then open http://localhost:3000. Fully offline after the model pull.
-
+#   ZeroWatch   http://localhost:8000      Prometheus  http://localhost:9090
+# Useful queries: rate(zerowatch_predictions_total[1m]), zerowatch_drift_state,
+#                 histogram_quantile(0.95, rate(zerowatch_inference_seconds_bucket[5m]))
 services:
-  ollama:
-    image: ollama/ollama
-    restart: unless-stopped
-    ports: ["11434:11434"]
-    volumes: ["ollama_data:/root/.ollama"]
-
-  backend:
-    build: ./backend
-    ports: ["8000:8000"]
-    env_file: ./backend/.env
-    environment:
-      # Overrides the .env value for container-to-container networking —
-      # "localhost" inside this container would mean the backend container
-      # itself, not the ollama service.
-      OLLAMA_BASE_URL: http://ollama:11434
-      DATABASE_URL: sqlite:////app/data/zerowatch.db
-      FRONTEND_ORIGIN: http://localhost:3000
-    depends_on:
-      - ollama
-    volumes:
-      - ./backend/data:/app/data
-      - ./backend/models/checkpoints:/app/models/checkpoints
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-
-  frontend:
-    build:
-      context: ./frontend
-      args:
-        # Browser-facing URLs — the browser runs on the host, not inside the
-        # compose network, so these stay pointed at the published host ports
-        # (baked in at build time since they're NEXT_PUBLIC_* vars).
-        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api
-        NEXT_PUBLIC_WS_BASE_URL: ws://localhost:8000/api
-    ports: ["3000:3000"]
-    depends_on:
-      - backend
-
-  # ── ZeroWatch Serve: the lean graded service (root Dockerfile) ─────────────
-  #   docker compose up --build serve        -> http://localhost:8080
-  serve:
+  zerowatch:
     build: .
     restart: unless-stopped
-    ports: ["8080:8000"]
+    ports: ["8000:8000"]
+    environment:
+      # set both to require keys for labelling, retraining and settings (leave empty for open mode)
+      ANALYST_TOKEN: ${ANALYST_TOKEN:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
     volumes:
-      - ./logs:/app/logs
-
-  # ── MLOps stack (opt-in):  docker compose --profile mlops up --build ───────
-  mlflow:
-    profiles: ["mlops"]
-    image: ghcr.io/mlflow/mlflow:v3.18.0
-    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////mlflow/mlflow.db --default-artifact-root /mlflow/artifacts
-    ports: ["5000:5000"]
-    volumes: ["mlflow_data:/mlflow"]
+      - zerowatch-logs:/app/logs   # prediction log, labels and learned models survive a restart
 
   prometheus:
-    profiles: ["mlops"]
-    image: prom/prometheus:v2.55.1
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
     ports: ["9090:9090"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    depends_on:
-      - backend
-
-  grafana:
-    profiles: ["mlops"]
-    image: grafana/grafana:11.3.0
-    ports: ["3001:3000"]
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-zerowatch}
-    volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      - prometheus
+    depends_on: [zerowatch]
 
 volumes:
-  ollama_data:
-  mlflow_data:
-  grafana_data:
+  zerowatch-logs:
