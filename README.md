@@ -265,7 +265,7 @@ docker run -d -p 8000:8000 --restart unless-stopped zerowatch
 
 Image size: about 137 MB as reported by `docker image inspect` in CI (python:3.11-slim plus 7 serving
 packages; no MLflow, pandas or pytest). The base image is pinned by digest and every package is installed
-with `--require-hashes` from the locked `requirements-serve.txt`; Dependabot proposes updates weekly.
+with `--require-hashes` from the locked `requirements-serve.txt`; Dependabot proposes digest and GitHub Actions updates weekly.
 
 ### Deploy (Render)
 
