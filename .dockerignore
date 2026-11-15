@@ -5,6 +5,11 @@
 !features.py
 !drift_check.py
 !learning.py
+!pcap_flows.py
+!recon.py
+!copilot.py
+!data/sample_capture.pcap
+!model/cross_dataset.json
 !model/model.joblib
 !model/metrics.json
 !model/model.sha256

@@ -210,3 +210,123 @@ def test_brief_and_model_integrity():
     b = client.get("/brief").json()
     assert b["flows"] > 0 and b["points"]
     assert service.MODEL_PATH.with_suffix(".sha256").read_text().strip() == service.MODEL_SHA
+
+
+# ---- real traffic, host graph, recon fusion, copilot ----
+def _capture():
+    from pcap_flows import write_pcap
+    S, SA, A, PA, FA, R = 0x02, 0x12, 0x10, 0x18, 0x11, 0x14
+    pk = []
+    for i in range(6):  # six complete web sessions
+        t, sp = i * 1.0, 40000 + i
+        pk += [(t, "10.0.0.101", "10.0.0.10", "tcp", sp, 80, S, 0), (t + .01, "10.0.0.10", "10.0.0.101", "tcp", 80, sp, SA, 0),
+               (t + .02, "10.0.0.101", "10.0.0.10", "tcp", sp, 80, A, 0), (t + .03, "10.0.0.101", "10.0.0.10", "tcp", sp, 80, PA, 300),
+               (t + .05, "10.0.0.10", "10.0.0.101", "tcp", 80, sp, PA, 2000), (t + .06, "10.0.0.101", "10.0.0.10", "tcp", sp, 80, FA, 0),
+               (t + .07, "10.0.0.10", "10.0.0.101", "tcp", 80, sp, FA, 0)]
+    for port in range(100, 140):  # port scan answered with RST
+        pk += [(8 + port / 1000, "10.0.0.66", "10.0.0.10", "tcp", 50000, port, S, 0),
+               (8.001 + port / 1000, "10.0.0.10", "10.0.0.66", "tcp", port, 50000, R, 0)]
+    for i in range(80):  # SYN flood, never answered
+        pk.append((10 + i * .01, "10.0.0.99", "10.0.0.10", "tcp", 1024 + i, 80, S, 0))
+    return write_pcap(sorted(pk))
+
+
+def test_pcap_becomes_contract_flows():
+    import pcap_flows
+    items = pcap_flows.to_flows(pcap_flows.connections(pcap_flows.parse_pcap(_capture())))
+    assert len(items) == 6 + 40 + 80
+    flags = {(i["src"], i["flow"]["flag"]) for i in items}
+    assert flags == {("10.0.0.101", "SF"), ("10.0.0.66", "REJ"), ("10.0.0.99", "S0")}
+    web = next(i["flow"] for i in items if i["src"] == "10.0.0.101")
+    assert web["service"] == "http" and web["src_bytes"] == 300 and web["dst_bytes"] == 2000
+    flood = [i["flow"] for i in items if i["src"] == "10.0.0.99"][-1]
+    assert flood["serror_rate"] == 1.0 and flood["count"] >= 70
+    for i in items:  # every derived flow must satisfy the data contract
+        service.Flow(**i["flow"])
+
+
+def test_capture_endpoint_finds_scanner_and_flooder():
+    r = client.post("/capture", content=_capture(), headers={"content-type": "application/octet-stream"})
+    assert r.status_code == 200
+    body = r.json()
+    roles = {s["ip"]: s["behaviour"] for s in body["graph"]["sources"]}
+    assert roles["10.0.0.66"] == "scanner" and roles["10.0.0.99"] == "flooder" and roles["10.0.0.101"] == "normal"
+    assert body["verdicts"].get("attack", 0) + body["verdicts"].get("zero_day_suspect", 0) >= 100
+    assert client.get("/capture/sample").json()["flows"] > 200
+
+
+def test_capture_rejects_garbage_and_oversize():
+    h = {"content-type": "application/octet-stream"}
+    assert client.post("/capture", content=b"this is not a pcap file at all", headers=h).status_code == 422
+    assert client.post("/capture", content=b"\x0a\x0d\x0d\x0a" + b"\x00" * 40, headers=h).status_code == 422  # pcapng
+    assert client.post("/capture", content=b"\x00" * 5_000_001, headers=h).status_code == 413
+
+
+def test_recon_blocks_internal_targets():
+    import recon
+    for url in ("http://127.0.0.1/", "http://169.254.169.254/latest/meta-data", "https://10.0.0.5/",
+                "https://192.168.1.1/", "ftp://example.com/", "http://[::1]/", "https://8.8.8.8:22/"):
+        try:
+            recon.safe_target(url)
+            raise AssertionError(f"{url} should have been refused")
+        except recon.ReconError:
+            pass
+    assert client.post("/assets", json={"name": "meta", "url": "http://169.254.169.254/", "services": ["http"]}).status_code == 422
+
+
+def test_exposure_scoring_and_priority_fusion():
+    import recon
+    hardened = recon.score_findings("https", {"Strict-Transport-Security": "max-age=1", "Content-Security-Policy": "x",
+                                              "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
+                                              "Referrer-Policy": "no-referrer", "Server": "nginx"},
+                                    {"version": "TLSv1.3", "days_left": 200})
+    weak = recon.score_findings("http", {"Server": "Apache/2.4.49", "X-Powered-By": "PHP/5.6"}, None)
+    assert hardened["exposure"] == 0 and hardened["grade"] == "A"
+    assert weak["exposure"] > 60 and weak["grade"] == "D"
+    assert recon.priority(80, 100) > 80 > recon.priority(80, 0) and recon.priority(80, 50) == 80
+    # fusion: register an exposed asset running "private" and score a flood against it
+    service.ASSETS["db"] = {"name": "db", "services": ["private"], "url": "https://db.example", **weak}
+    try:
+        r = client.post("/predict", json=SYN_FLOOD).json()
+        assert r["asset_context"]["asset"] == "db" and r["asset_context"]["priority"] >= r["risk_score"]
+        assert "asset_context" not in client.post("/predict", json=NORMAL).json()
+    finally:
+        service.ASSETS.pop("db")
+
+
+def test_copilot_uses_llm_when_configured_and_rules_otherwise(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    client.post("/predict", json=SYN_FLOOD)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    r = client.post("/copilot", json={"question": "What happened in the last hour?"}).json()
+    assert r["engine"] == "rules" and "known attacks" in r["answer"]
+    assert "intact" in client.post("/copilot", json={"question": "Can I trust the log, was it tampered?"}).json()["answer"]
+
+    seen = {}
+
+    class FakeLLM(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen["body"] = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            out = json.dumps({"choices": [{"message": {"content": "Two floods hit http."}}]}).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), FakeLLM)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("LLM_BASE_URL", f"http://127.0.0.1:{srv.server_port}/v1")
+        r = client.post("/copilot", json={"question": "Summarise the attacks"}).json()
+        assert r == {"answer": "Two floods hit http.", "engine": "llm", "model": "llama3.1:8b"}
+        assert "verdicts" in seen["body"]["messages"][1]["content"]  # grounded in the log summary
+        monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:9/v1")  # nothing listening: must fall back
+        assert client.post("/copilot", json={"question": "Summarise the attacks"}).json()["engine"] == "rules"
+    finally:
+        srv.shutdown()
+    assert client.post("/copilot", json={"question": "x"}).status_code == 422

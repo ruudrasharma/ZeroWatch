@@ -57,6 +57,40 @@ Around the loop:
   the model is over 99% sure is an attack) are quarantined before retraining. CI audits dependencies.
 - **Shift report.** `/brief` summarises the log into what happened and what to do first.
 
+### Real traffic, a second dataset, assets and a copilot
+
+- **Capture tab: real traffic.** Upload a `.pcap` (up to 5 MB). [`pcap_flows.py`](pcap_flows.py) parses it with the
+  standard library, rebuilds TCP/UDP/ICMP connections, derives the connection state from the TCP flags and
+  computes the same 20 contract features, so the deployed model scores live packets. A synthetic sample
+  capture (web, mail and DNS traffic plus a port scan and a SYN flood) is bundled; on it the model flags all
+  60 scan connections and 158 of 160 flood connections, with 7 false alarms in 90 normal connections.
+- **Host graph.** Packets carry addresses, which NSL-KDD does not. Each source is judged on all of its flows
+  together (distinct ports and hosts, share of failed connections) and labelled scanner, flooder or normal.
+  This is graph analytics on the capture, not a trained graph neural network: there is no labelled dataset
+  with addresses to train one on.
+- **Cross-dataset test.** [`cross_dataset.py`](cross_dataset.py) maps NSL-KDD and UNSW-NB15 onto the six
+  measurements they share and trains on one, tests on the other:
+
+  | Trained on | F1 on NSL-KDD | F1 on UNSW-NB15 |
+  |---|---|---|
+  | NSL-KDD | 0.820 | 0.228 |
+  | UNSW-NB15 | 0.162 | 0.909 |
+  | Both | 0.810 | 0.908 |
+
+  A detector trained on one network barely works on another (ROC-AUC 0.38 for NSL-KDD → UNSW-NB15, worse than
+  guessing), and training on both recovers both. This is the measured reason the retraining loop exists.
+- **Assets: recon fused into alerts.** Register an asset with its URL and the services it runs.
+  [`recon.py`](recon.py) makes one passive check (HTTPS headers, TLS version and certificate expiry) and scores
+  exposure 0–100. Alerts on that asset's services then carry a priority: risk × (0.7 + 0.6 × exposure/100).
+  The scan refuses private, loopback, link-local and cloud-metadata addresses, follows no redirects, and is
+  limited to 6 per minute per client; set `RECON_ENABLED=0` to switch it off.
+- **Copilot.** `/copilot` answers questions about what the service has seen. With `LLM_BASE_URL` set to any
+  OpenAI-compatible endpoint (Ollama at `http://localhost:11434/v1`, Groq, OpenRouter) the answer comes from
+  that model, grounded in a JSON summary of the log. Without it, or if the model does not answer, built-in
+  rules answer the same questions, so it works on a free-tier host.
+
+![Capture tab](docs/screenshots/ui-capture-dark.png)
+
 ## Dataset
 
 **NSL-KDD** (Canadian Institute for Cybersecurity, University of New Brunswick):
@@ -116,13 +150,17 @@ ZeroWatch/
 │   ├── train_cache.npz         # compact training data so the service can retrain a challenger
 │   └── experiments.json        # MLflow runs exported for the UI
 ├── static/                     # index.html, styles.css, app.js (console UI, light + dark)
-├── tests/test_app.py           # 21 pytest tests
+├── tests/test_app.py           # 27 pytest tests
 ├── logs/sample_predictions.jsonl
 ├── .github/workflows/ci.yml    # install -> train -> pytest -> docker smoke test -> deploy
 ├── app.py                      # FastAPI app + Pydantic schema
 ├── train.py                    # training with MLflow tracking
 ├── features.py                 # the contract and encoding shared by train.py and app.py
 ├── learning.py                 # campaigns, generated rules, challenger retraining, evasion search
+├── pcap_flows.py               # .pcap -> connections -> contract flows + host graph
+├── recon.py                    # passive asset exposure scan with SSRF guard
+├── copilot.py                  # analyst Q&A: LLM if configured, rules otherwise
+├── cross_dataset.py            # NSL-KDD <-> UNSW-NB15 generalisation test
 ├── drift_check.py              # drift check on logged inputs (bonus)
 ├── export_experiments.py       # MLflow runs -> README table / UI
 ├── run_experiments.sh          # the 7 tracked runs
@@ -146,6 +184,8 @@ mlflow ui --backend-store-uri sqlite:///mlflow.db      # http://localhost:5000
 uvicorn app:app --reload --port 8000                   # UI at http://localhost:8000, API docs at /docs
 pytest -v --tb=short
 python drift_check.py                                  # compare logs/predictions.jsonl with training data
+python cross_dataset.py                                # NSL-KDD <-> UNSW-NB15 (downloads 32 MB on first run)
+LLM_BASE_URL=http://localhost:11434/v1 uvicorn app:app --port 8000   # copilot answers with Ollama
 ```
 
 ### Docker
@@ -217,6 +257,9 @@ Run 7 is also registered in the MLflow Model Registry as `zerowatch-detector` wi
 | `GET /campaigns`, `POST /campaigns/{id}/label` | Possible zero-days grouped into campaigns with generated rules; label a campaign |
 | `POST /learning/retrain` | Train a challenger on labelled flows and promote it only if better |
 | `GET /audit/verify`, `GET /brief` | Verify the log's hash chain; shift report |
+| `POST /capture`, `GET /capture/sample` | Score a `.pcap`: flows, verdicts and the host graph |
+| `POST /assets`, `GET /assets`, `DELETE /assets/{name}` | Register an asset and scan its exposure |
+| `POST /copilot` | Ask a question about the scored traffic |
 | `GET /simulate` | Replay labelled held-out flows through the model |
 | `GET /model/info`, `GET /contract` | Model card and the data contract |
 | `GET /monitoring/drift`, `GET /monitoring/recent` | Drift report and latest logged predictions |
@@ -242,7 +285,7 @@ What the service adds on top of a plain prediction:
 
 ## Tests
 
-`pytest -v --tb=short` runs 21 tests in `tests/test_app.py`, including the four required ones:
+`pytest -v --tb=short` runs 27 tests in `tests/test_app.py`, including the four required ones:
 
 | Required test | Test |
 |---|---|
@@ -253,7 +296,9 @@ What the service adds on top of a plain prediction:
 
 The rest cover the response shape, tips, batch limits, the counterfactual, prediction logging, the drift
 report, feedback, the metrics and model-info routes, the full campaign → label → retrain loop, label
-poisoning, the evasion search, the "not sure" band, and tampering with the log's hash chain.
+poisoning, the evasion search, the "not sure" band, tampering with the log's hash chain, pcap parsing and
+the capture route, the scan's refusal of internal addresses, exposure scoring and priority fusion, and the
+copilot with a stub LLM server and with none.
 
 ## CI/CD
 
@@ -269,7 +314,7 @@ The older Next.js/recon platform has its own workflow (`platform.yml`) that only
 | Light theme ![light](docs/screenshots/ui-analyze-light.png) | Invalid input rejected with 422 ![422](docs/screenshots/ui-422.png) |
 | Live replay ![live](docs/screenshots/ui-live-dark.png) | Model tab ![model](docs/screenshots/ui-model-light.png) |
 | Monitoring and drift ![monitoring](docs/screenshots/ui-monitoring-dark.png) | `/docs` ![docs](docs/screenshots/api-docs.png) |
-| Hunt: campaigns and generated rules ![hunt](docs/screenshots/ui-hunt-campaigns.png) | |
+| Hunt: campaigns and generated rules ![hunt](docs/screenshots/ui-hunt-campaigns.png) | Assets ![assets](docs/screenshots/ui-assets.png) |
 
 Still to add before submission (they need your own machine and GitHub): `docs/screenshots/mlflow-ui.png`,
 `docs/screenshots/pytest.png`, `docs/screenshots/ci-green.png`.
@@ -287,6 +332,9 @@ Still to add before submission (they need your own machine and GitHub): `docs/sc
   traffic. The UI shows the rule's false-match rate so this is visible before labelling.
 - The conformal guarantee assumes live traffic resembles validation traffic. On shifted traffic such as
   KDDTest+ it is a useful review queue, not a guarantee.
+- Flows built from packets have no session-content features (failed logins, root shell), and `logged_in` is
+  approximated, so content-based attacks are invisible in captures. The bundled capture is synthetic.
+- The copilot's LLM path is tested against a stub server, not a real model.
 - Drift is checked on inputs only. There are no live labels, so accuracy decay is inferred, not measured.
 
 ## Team

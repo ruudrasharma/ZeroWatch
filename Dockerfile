@@ -8,10 +8,10 @@ WORKDIR /app
 COPY requirements-serve.txt .
 RUN pip install -r requirements-serve.txt
 
-COPY app.py features.py drift_check.py learning.py ./
+COPY app.py features.py drift_check.py learning.py pcap_flows.py recon.py copilot.py ./
 COPY model/ model/
 COPY static/ static/
-COPY data/sample_flows.json data/sample_flows.json
+COPY data/sample_flows.json data/sample_capture.pcap data/
 
 # run as a non-root user; logs/ is the only writable path
 RUN useradd --create-home --uid 10001 zerowatch && mkdir -p logs && chown -R zerowatch logs
