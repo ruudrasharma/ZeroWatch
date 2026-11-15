@@ -21,14 +21,16 @@ async function api(path, body, method) {
   const res = await fetch(path, { method: method || (body === undefined ? "GET" : "POST"), headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401) toast("That action needs an API key. Use Sign in at the top.", true);
-    if (res.status === 403) toast("That action needs the admin key.", true);
+    const action = body !== undefined || (method && method !== "GET");  // background loads show their own sign-in note
+    if (res.status === 401 && action) toast("That action needs an API key. Use Sign in at the top.", true);
+    if (res.status === 403 && action) toast("That action needs the admin key.", true);
     if (res.status === 429) toast("Too many requests. Wait a minute and try again.", true);
     throw Object.assign(new Error("HTTP " + res.status), { status: res.status, data });
   }
   return data;
 }
 function toast(text, bad) {
+  if ([...$("#toasts").children].some((c) => c.firstChild && c.firstChild.textContent === text)) return;  // no stacked duplicates
   const t = document.createElement("div");
   t.className = "toast" + (bad ? " bad" : ""); t.textContent = text;
   const x = document.createElement("button"); x.textContent = "Dismiss"; x.onclick = () => t.remove(); t.appendChild(x);
