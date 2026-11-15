@@ -13,6 +13,10 @@ Routes
   POST /learning/retrain    train a challenger on the labelled flows; promote it only if better
   GET  /audit/verify        check the hash chain of the prediction log
   GET  /brief               shift report: what happened and what to do
+  POST /capture             upload a .pcap: packets -> flows -> verdicts + host graph
+  GET  /capture/sample      the same for the bundled sample capture
+  POST /assets, GET /assets register an asset; one passive exposure scan; alerts on it get a priority
+  POST /copilot             ask a question about what the service has seen (LLM or built-in rules)
   GET  /simulate            replay labelled held-out flows through the model
   GET  /contract            the data contract (drives the UI form)
   GET  /model/info          model card: algorithm, hyperparameters, metrics
@@ -45,6 +49,9 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
 
+import pcap_flows
+import recon
+from copilot import answer as copilot_answer
 from drift_check import drift_report, read_inputs
 from features import CONTRACT, FEATURES, FLAGS, PROTOCOLS, SERVICES, encode
 from learning import find_campaigns, red_team, retrain
@@ -76,6 +83,9 @@ _cache_file = MODEL_PATH.with_name("train_cache.npz")
 CACHE = dict(np.load(_cache_file)) if _cache_file.exists() else None  # training data for online retraining
 NORMAL_REF = CACHE["X_fit"][CACHE["y_fit"] == 0][:2000].astype(float) if CACHE else None
 LEARNING = {"generation": 0, "last_report": None}
+ASSET_FILE = LOG_DIR / "assets.json"
+ASSETS: dict[str, dict] = json.loads(ASSET_FILE.read_text()) if ASSET_FILE.exists() else {}
+MAX_CAPTURE_BYTES = 5_000_000
 CAMPAIGNS: dict[str, dict] = {}
 
 RECENT: deque = deque(maxlen=300)
@@ -288,6 +298,11 @@ def analyse(flow: dict, with_explanation: bool = True, log: bool = True, truth: 
         "model_version": model_version(),
         "latency_ms": round((time.perf_counter() - t0) * 1000, 2),
     }
+    asset = next((a for a in ASSETS.values() if flow["service"] in a["services"]), None)
+    if asset:  # recon fusion: the same risk matters more on an exposed asset
+        result["asset_context"] = {"asset": asset["name"], "exposure": asset["exposure"], "grade": asset["grade"],
+                                   "priority": recon.priority(risk, asset["exposure"]),
+                                   "top_finding": asset["findings"][0]["text"] if asset["findings"] else None}
     if log:  # what-if and red-team probes are not real traffic: keep them out of the log and metrics
         LATENCY.observe(time.perf_counter() - t0)
         PREDICTIONS.labels(verdict).inc()
@@ -385,7 +400,7 @@ async def contract_violation(_: Request, exc: RequestValidationError):
 @app.middleware("http")
 async def guard(request: Request, call_next):
     """Per-IP rate limit on scoring routes + basic security headers."""
-    if request.url.path.startswith(("/predict", "/counterfactual", "/redteam", "/learning")):
+    if request.url.path.startswith(("/predict", "/counterfactual", "/redteam", "/learning", "/capture", "/copilot")):
         # behind Render's proxy every client shares one socket address, so use the forwarded one
         ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
             request.client.host if request.client else "?")
@@ -490,6 +505,8 @@ def model_info():
             "learning": {k: v for k, v in LEARNING.items() if k != "detector"},
             **{k: META[k] for k in ("algorithm", "params", "metrics", "trained_at", "git_sha", "sklearn",
                                     "rows", "feature_importance", "data_sha256")},
+            "cross_dataset": json.loads((ROOT / "model" / "cross_dataset.json").read_text())
+            if (ROOT / "model" / "cross_dataset.json").exists() else None,
             "experiments": json.loads((ROOT / "model" / "experiments.json").read_text())
             if (ROOT / "model" / "experiments.json").exists() else []}
 
@@ -649,6 +666,124 @@ def brief(last: int = 500):
     return {"flows": n, "window": {"from": entries[0]["ts"], "to": entries[-1]["ts"]},
             "headline": f"{flagged} of {n} flows flagged, {len(unsure)} held for review.",
             "points": points, "actions": actions}
+
+
+# ---- real traffic ----
+def _capture_report(data: bytes, name: str) -> dict:
+    try:
+        items = pcap_flows.to_flows(pcap_flows.connections(pcap_flows.parse_pcap(data)))
+    except pcap_flows.PcapError as e:
+        raise HTTPException(422, str(e)) from None
+    results = [analyse(Flow(**it["flow"]).model_dump(), with_explanation=False) for it in items[:3000]]
+    items = items[:len(results)]
+    counts: dict = {}
+    for r in results:
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+    rows = [{"src": it["src"], "dst": it["dst"], "dport": it["dport"], "service": it["flow"]["service"],
+             "flag": it["flow"]["flag"], "verdict": r["verdict"], "risk": r["risk_score"], "family": r["attack_family"],
+             "priority": r.get("asset_context", {}).get("priority"), "flow": it["flow"]}
+            for it, r in zip(items, results, strict=True)]
+    rows.sort(key=lambda r: -r["risk"])
+    return {"name": name, "flows": len(rows), "verdicts": counts, "graph": pcap_flows.host_graph(items, results),
+            "rows": rows[:200],
+            "span_seconds": round(max(i["start"] for i in items) - min(i["start"] for i in items), 1)}
+
+
+@app.post("/capture")
+async def capture(request: Request):
+    """Body: the raw bytes of a classic .pcap file (Content-Type: application/octet-stream), up to 5 MB."""
+    data = await request.body()
+    if len(data) > MAX_CAPTURE_BYTES:
+        raise HTTPException(413, "Capture is larger than 5 MB. Trim it first, e.g. editcap -c 20000 in.pcap out.pcap")
+    return _capture_report(data, "uploaded capture")
+
+
+@app.get("/capture/sample")
+def capture_sample():
+    return _capture_report((ROOT / "data" / "sample_capture.pcap").read_bytes(), "sample_capture.pcap (synthetic)")
+
+
+# ---- assets: recon fused into alert priority ----
+class AssetIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=40, pattern=r"^[\w .-]+$")
+    url: str = Field(min_length=8, max_length=200)
+    services: list[Literal[tuple(SERVICES)]] = Field(min_length=1, max_length=8)
+
+
+_scans: dict[str, deque] = {}
+
+
+@app.post("/assets")
+def add_asset(body: AssetIn, request: Request):
+    if os.getenv("RECON_ENABLED", "1") != "1":
+        raise HTTPException(503, "Asset scanning is switched off on this deployment (RECON_ENABLED=0).")
+    ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "?")
+    q = _scans.setdefault(ip, deque())
+    now = time.time()
+    while q and now - q[0] > 60:
+        q.popleft()
+    if len(q) >= 6:  # each scan makes an outbound request, so this limit is much tighter than scoring
+        raise HTTPException(429, "Scan limit reached: 6 per minute.")
+    q.append(now)
+    if len(ASSETS) >= 20 and body.name not in ASSETS:
+        raise HTTPException(409, "Asset list is full (20). Remove one first.")
+    try:
+        result = recon.scan(body.url)
+    except recon.ReconError as e:
+        raise HTTPException(422, str(e)) from None
+    ASSETS[body.name] = {"name": body.name, "services": body.services, **result}
+    try:
+        ASSET_FILE.write_text(json.dumps(ASSETS))
+    except OSError:
+        pass
+    return ASSETS[body.name]
+
+
+@app.get("/assets")
+def list_assets():
+    return {"assets": list(ASSETS.values()), "enabled": os.getenv("RECON_ENABLED", "1") == "1"}
+
+
+@app.delete("/assets/{name}")
+def delete_asset(name: str):
+    if ASSETS.pop(name, None) is None:
+        raise HTTPException(404, "No asset with that name.")
+    try:
+        ASSET_FILE.write_text(json.dumps(ASSETS))
+    except OSError:
+        pass
+    return {"removed": name}
+
+
+# ---- copilot ----
+class Question(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(min_length=3, max_length=300)
+
+
+@app.post("/copilot")
+def copilot(q: Question):
+    entries = read_log(500)
+    verdicts: dict = {}
+    fam: dict = {}
+    svc: dict = {}
+    for e in entries:
+        o = e["output"]
+        verdicts[o["verdict"]] = verdicts.get(o["verdict"], 0) + 1
+        if o["verdict"] == "attack":
+            fam[o["attack_family"]] = fam.get(o["attack_family"], 0) + 1
+            svc[e["input"]["service"]] = svc.get(e["input"]["service"], 0) + 1
+    b = brief()
+    context = {"flows": len(entries), "verdicts": verdicts,
+               "attack_families": sorted(fam.items(), key=lambda kv: -kv[1])[:4],
+               "top_services_attacked": sorted(svc.items(), key=lambda kv: -kv[1])[:4],
+               "actions": b["actions"], "log_chain_valid": audit_verify()["valid"],
+               "drift_status": drift_report(read_inputs(LOG_FILE, 2000), META["feature_stats"])["status"],
+               "campaigns": len(find_campaigns(current_suspects(), NORMAL_REF)) if NORMAL_REF is not None else 0,
+               "assets": [{"name": a["name"], "exposure": a["exposure"], "services": a["services"]} for a in ASSETS.values()],
+               "model_version": model_version()}
+    return copilot_answer(q.question, context)
 
 
 @app.post("/feedback")

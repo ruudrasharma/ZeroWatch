@@ -26,7 +26,9 @@
       <nav class="tabs" role="tablist" aria-label="Views">
         <button role="tab" data-view="analyze" aria-selected="true">Analyze a flow</button>
         <button role="tab" data-view="live" aria-selected="false">Live traffic</button>
+        <button role="tab" data-view="capture" aria-selected="false">Capture</button>
         <button role="tab" data-view="hunt" aria-selected="false">Hunt</button>
+        <button role="tab" data-view="assets" aria-selected="false">Assets</button>
         <button role="tab" data-view="batch" aria-selected="false">Batch</button>
         <button role="tab" data-view="model" aria-selected="false">Model</button>
         <button role="tab" data-view="monitor" aria-selected="false">Monitoring</button>
@@ -85,6 +87,42 @@
           <tbody id="live-rows"><tr><td colspan="6" class="empty">Start the replay to stream flows through the model. Select a row to open it in Analyze.</td></tr></tbody>
         </table>
       </div>
+    </section>
+
+    <!-- Capture -->
+    <section id="view-capture" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Capture</h1>
+          <p>Score real traffic. A .pcap file is rebuilt into connections, each connection becomes a flow in the data contract, and every source is also judged on all of its flows together.</p>
+        </div>
+        <div class="form-foot" style="margin:0">
+          <button class="btn primary" id="cap-sample">Analyze the sample capture</button>
+          <label class="btn" for="cap-file">Choose a .pcap file</label>
+          <input type="file" id="cap-file" accept=".pcap,.cap" hidden>
+        </div>
+      </div>
+      <div id="cap-out"><div class="panel"><div class="empty"><b>No capture analyzed yet</b>Use the sample capture, or choose a classic .pcap file up to 5 MB. Record one with: tcpdump -w traffic.pcap -c 20000</div></div></div>
+    </section>
+
+    <!-- Assets -->
+    <section id="view-assets" hidden>
+      <div class="view-head">
+        <div>
+          <h1 style="font-size:1.6rem">Assets</h1>
+          <p>Tell ZeroWatch what it is protecting. Each asset gets one passive exposure check (its HTTPS headers and TLS certificate). Alerts on the services it runs are then given a priority: the same attack ranks higher against an exposed asset.</p>
+        </div>
+      </div>
+      <form class="panel" id="asset-form">
+        <div class="fields" style="grid-template-columns: 1fr 2fr 1.4fr">
+          <div class="field"><label for="a-name">name</label><input id="a-name" required maxlength="40" placeholder="Public website"></div>
+          <div class="field"><label for="a-url">url</label><input id="a-url" required placeholder="https://example.org"></div>
+          <div class="field"><label for="a-services">services it runs</label><input id="a-services" required value="http, http_443" ><small>contract service names, comma separated</small></div>
+        </div>
+        <div class="form-foot"><button class="btn primary" type="submit" id="a-submit">Scan and register asset</button><span class="muted">Only public http/https hosts are scanned; internal addresses are refused.</span></div>
+        <div id="asset-error"></div>
+      </form>
+      <div id="asset-out"></div>
     </section>
 
     <!-- Hunt -->

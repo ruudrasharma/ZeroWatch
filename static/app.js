@@ -30,7 +30,7 @@ $("#theme").onclick = () => setTheme(document.documentElement.dataset.theme === 
 setTheme(document.documentElement.dataset.theme);
 
 // ---------- tabs ----------
-const loaders = { model: loadModel, monitor: loadMonitor, hunt: loadHunt };
+const loaders = { model: loadModel, monitor: loadMonitor, hunt: loadHunt, assets: loadAssets };
 document.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => show(b.dataset.view)));
 function show(view) {
   document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.view === view));
@@ -135,6 +135,9 @@ function renderResult(r) {
       ${meter("Known-attack probability", r.attack_probability, 0.5)}${meter("Novelty vs normal traffic", r.novelty_score, 0.5)}
       <p class="muted" style="font-size:.82rem;margin-top:6px">The tick marks the alert threshold. A flow the classifier passes but the novelty model flags is reported as a possible zero-day.</p>
       ${fam.length ? `<p style="font-size:.85rem;margin-top:8px">Closest attack family: ${fam.map(([k, v]) => `${k} ${(v * 100).toFixed(0)}%`).join(", ")}</p>` : ""}</div>
+    ${r.asset_context ? `<div class="block"><h3>Asset under attack: ${esc(r.asset_context.asset)}</h3>
+      ${meter("Asset exposure", r.asset_context.exposure / 100, 0.5)}
+      <p style="font-size:.9rem;margin-top:6px">Alert priority <b>${r.asset_context.priority}</b> (model risk ${r.risk_score}, ${r.asset_context.priority > r.risk_score ? "raised" : r.asset_context.priority < r.risk_score ? "lowered" : "unchanged"} because this asset is graded ${r.asset_context.grade} for exposure).${r.asset_context.top_finding ? " Worst finding: " + esc(r.asset_context.top_finding) : ""}</p></div>` : ""}
     <div class="block"><h3>What to do</h3><ul class="tips">${r.tips.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>
     <div class="block"><h3>Why the model decided this</h3>
       ${r.top_factors.length ? r.top_factors.map((f) => `<div class="factor"><span class="name">${f.feature} = ${esc(f.value)}<small>typical normal flow: ${esc(f.typical)}</small></span>
@@ -213,6 +216,71 @@ $("#live-toggle").onclick = () => {
   else { liveTick(); liveTimer = setInterval(liveTick, 1400); $("#live-toggle").textContent = "Pause replay"; }
 };
 liveStats();
+
+// ---------- capture ----------
+function graphSvg(g) {
+  const srcs = g.sources.slice(0, 12), ips = new Set(srcs.map((s) => s.ip));
+  const edges = g.edges.filter((e) => ips.has(e.src));
+  const dsts = [...new Set(edges.map((e) => e.dst))].slice(0, 12);
+  const H = Math.max(srcs.length, dsts.length, 3) * 34 + 40, y = (i, n) => 34 + (i + 0.5) * ((H - 44) / n);
+  const tone = (r) => (r >= 65 ? "var(--attack)" : r >= 40 ? "var(--suspect)" : "var(--benign)");
+  const sy = Object.fromEntries(srcs.map((s, i) => [s.ip, y(i, srcs.length)])), dy = Object.fromEntries(dsts.map((d, i) => [d, y(i, dsts.length)]));
+  return `<svg class="graph" viewBox="0 0 760 ${H}" role="img" aria-label="Host graph: sources on the left, destinations on the right">
+    <text class="lbl" x="150" y="16" text-anchor="end">Sources</text><text class="lbl" x="610" y="16">Destinations</text>
+    ${edges.filter((e) => e.dst in dy).map((e) => `<line x1="160" y1="${sy[e.src]}" x2="600" y2="${dy[e.dst]}" stroke="${tone(e.max_risk)}" stroke-width="${Math.min(7, 1 + Math.log2(e.flows + 1))}"><title>${e.src} to ${e.dst}: ${e.flows} flows, highest risk ${e.max_risk}</title></line>`).join("")}
+    ${srcs.map((s) => `<circle cx="160" cy="${sy[s.ip]}" r="${s.behaviour === "normal" ? 6 : 9}" fill="${tone(s.source_risk)}"/><text x="146" y="${sy[s.ip] + 4}" text-anchor="end">${esc(s.ip)}${s.behaviour !== "normal" ? " (" + s.behaviour + ")" : ""}</text>`).join("")}
+    ${dsts.map((d) => `<circle cx="600" cy="${dy[d]}" r="7" fill="var(--muted)"/><text x="614" y="${dy[d] + 4}">${esc(d)}</text>`).join("")}</svg>`;
+}
+function renderCapture(d) {
+  const bad = d.graph.sources.filter((s) => s.behaviour !== "normal");
+  $("#cap-out").innerHTML = `
+    <div class="stats"><div class="stat"><b>${d.flows.toLocaleString()}</b><span>connections rebuilt from ${esc(d.name)}, ${d.span_seconds} s</span></div>
+      ${["attack", "zero_day_suspect", "uncertain", "benign"].map((v) => `<div class="stat"><b>${d.verdicts[v] || 0}</b><span>${VERDICT[v]}</span></div>`).join("")}</div>
+    <div class="grid-2"><div class="panel"><h3>Host graph</h3><p class="note">Line colour is the highest risk seen on that path, line width the number of flows.</p>${graphSvg(d.graph)}</div>
+      <div class="panel table-wrap"><h3 style="margin-bottom:6px">Sources ranked by behaviour</h3>
+        <p class="note" style="margin-bottom:8px">${bad.length ? `${bad.length} source(s) behave like a scanner or flooder across their flows.` : "No source behaves like a scanner or flooder."}</p>
+        <table><thead><tr><th>Source</th><th>Behaviour</th><th class="num">Flows</th><th class="num">Ports</th><th class="num">Failed</th><th class="num">Risk</th></tr></thead><tbody>
+        ${d.graph.sources.slice(0, 10).map((s) => `<tr><td class="mono">${esc(s.ip)}</td><td>${s.behaviour === "normal" ? "normal" : `<span class="tag attack">${s.behaviour}</span>`}</td><td class="num">${s.flows}</td><td class="num">${s.distinct_ports}</td><td class="num">${pct(s.failed_share)}</td><td class="num">${s.source_risk}</td></tr>`).join("")}</tbody></table></div></div>
+    <div class="panel table-wrap" style="margin-top:16px"><h3 style="margin-bottom:10px">Riskiest connections</h3><table><thead><tr><th>Source</th><th>Destination</th><th>Service</th><th>State</th><th>Verdict</th><th class="num">Risk</th>${d.rows.some((r) => r.priority != null) ? '<th class="num">Priority</th>' : ""}</tr></thead><tbody>
+      ${d.rows.slice(0, 15).map((r, i) => `<tr class="click" data-row="${i}"><td class="mono">${esc(r.src)}</td><td class="mono">${esc(r.dst)}:${r.dport}</td><td class="mono">${esc(r.service)}</td><td class="mono">${r.flag}</td><td><span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span></td><td class="num">${r.risk}</td>${d.rows.some((x) => x.priority != null) ? `<td class="num">${r.priority ?? ""}</td>` : ""}</tr>`).join("")}</tbody></table>
+      <p class="note">Select a row to open that connection in Analyze. Session-content features (failed logins, root shell) cannot be read from packets and are set to 0.</p></div>`;
+  document.querySelectorAll("#cap-out [data-row]").forEach((tr) => (tr.onclick = () => { show("analyze"); fill(d.rows[tr.dataset.row].flow); $("#flow-form").requestSubmit(); }));
+}
+async function runCapture(promise) {
+  $("#cap-out").innerHTML = `<div class="panel"><div class="empty"><b>Rebuilding connections...</b></div></div>`;
+  try { renderCapture(await promise); }
+  catch (e) { $("#cap-out").innerHTML = `<div class="error-box"><b>Could not analyze that file${e.status ? " (HTTP " + e.status + ")" : ""}.</b> ${esc((e.data && e.data.detail) || "Check that the service is running.")}</div>`; }
+}
+$("#cap-sample").onclick = () => runCapture(api("/capture/sample"));
+$("#cap-file").onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  runCapture(fetch("/capture", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: f }).then(async (res) => {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error("HTTP " + res.status), { status: res.status, data });
+    return data;
+  }));
+};
+
+// ---------- assets ----------
+async function loadAssets() {
+  const d = await api("/assets");
+  $("#asset-out").innerHTML = d.assets.length ? d.assets.map((a) => `<div class="panel"><div class="campaign"><div>
+      <h3>${esc(a.name)} <span class="tag ${a.exposure >= 60 ? "attack" : a.exposure >= 35 ? "zero_day_suspect" : "benign"}">exposure ${a.exposure}/100, grade ${a.grade}</span></h3>
+      <p class="note mono">${esc(a.url)}${a.tls ? `, ${esc(a.tls.version)}, certificate valid ${a.tls.days_left} more days` : ""}. Applies to alerts on: ${a.services.map(esc).join(", ")}</p>
+      ${a.findings.length ? `<ul class="brief">${a.findings.map((f) => `<li><b>${f.severity}</b> ${esc(f.text)}</li>`).join("")}</ul>` : `<p style="margin-top:8px">No exposure findings from the passive check.</p>`}
+      </div><div class="side"><button class="btn" data-del="${esc(a.name)}">Remove</button></div></div></div>`).join("")
+    : `<div class="panel"><div class="empty"><b>No assets registered</b>${d.enabled ? "Add the first one above. Alerts on its services will then show a priority." : "Asset scanning is switched off on this deployment."}</div></div>`;
+  document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await fetch("/assets/" + encodeURIComponent(b.dataset.del), { method: "DELETE" }); loadAssets(); }));
+}
+$("#asset-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = $("#a-submit"); btn.disabled = true; $("#asset-error").innerHTML = "";
+  try {
+    await api("/assets", { name: $("#a-name").value.trim(), url: $("#a-url").value.trim(), services: $("#a-services").value.split(",").map((s) => s.trim()).filter(Boolean) });
+    loadAssets();
+  } catch (err) { showValidation(err, "#asset-error"); }
+  btn.disabled = false;
+};
 
 // ---------- hunt ----------
 let lastRetrain = null;
@@ -320,6 +388,13 @@ async function loadModel() {
     </div>
     ${m.experiments.length ? `<div class="panel table-wrap" style="margin-top:16px"><h3 style="margin-bottom:10px">Experiments tracked in MLflow</h3><table><thead><tr><th>Run</th><th>Algorithm</th><th>Hyperparameters</th><th class="num">Val F1</th><th class="num">Test acc.</th><th class="num">Test F1</th><th class="num">Ensemble F1</th><th class="num">Zero-day recall</th></tr></thead><tbody>
       ${m.experiments.map((e) => `<tr class="${e.promoted ? "best" : ""}"><td class="mono">${esc(e.run)}${e.promoted ? " (deployed)" : ""}</td><td>${esc(e.algorithm)}</td><td class="mono">${esc(e.hyperparameters)}</td><td class="num">${e.val_f1.toFixed(4)}</td><td class="num">${e.test_accuracy.toFixed(4)}</td><td class="num">${e.test_f1.toFixed(4)}</td><td class="num">${e.ensemble_test_f1.toFixed(4)}</td><td class="num">${pct(e.zero_day_recall_ensemble)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${m.cross_dataset ? (() => { const x = m.cross_dataset.results, cell = (tr, te) => x.find((r) => r.trained_on === tr && r.tested_on === te).f1;
+      const td = (v) => `<td class="cell" style="background:color-mix(in srgb, var(--${v >= 0.75 ? "benign" : v >= 0.5 ? "suspect" : "attack"}) ${Math.round(12 + v * 18)}%, transparent)">${v.toFixed(3)}</td>`;
+      return `<div class="panel table-wrap" style="margin-top:16px"><h3>Does it generalise to another network?</h3>
+        <p class="muted" style="margin:6px 0 12px;font-size:.88rem;max-width:80ch">The same algorithm trained on one dataset and tested on the other, using only the six measurements NSL-KDD and UNSW-NB15 share (${m.cross_dataset.features.join(", ")}). F1 score.</p>
+        <table class="heat" style="max-width:560px"><thead><tr><th>Trained on</th><th class="num" style="text-align:center">Tested on NSL-KDD</th><th class="num" style="text-align:center">Tested on UNSW-NB15</th></tr></thead><tbody>
+        ${["NSL-KDD", "UNSW-NB15", "Both"].map((tr) => `<tr><td>${tr}</td>${td(cell(tr, "NSL-KDD"))}${td(cell(tr, "UNSW-NB15"))}</tr>`).join("")}</tbody></table>
+        <p class="note">A model trained on one network barely works on the other; training on both recovers both. A detector has to be retrained on the traffic it will actually see.</p></div>`; })() : ""}
     <div class="cols" style="margin-top:16px">
       ${imp.length ? `<div class="panel"><h3 style="margin-bottom:12px">Features the classifier relies on most</h3><div class="pair">${imp.map(([k, v]) => `<div class="row hi"><span class="mono">${k}</span><div class="bar"><b style="width:${(v / top) * 100}%"></b></div><span>${v.toFixed(3)}</span></div>`).join("")}</div></div>` : ""}
       <div class="panel table-wrap"><h3 style="margin-bottom:10px">Data contract</h3><table><thead><tr><th>Feature</th><th>Type</th><th>Allowed</th></tr></thead><tbody>
@@ -343,11 +418,23 @@ async function loadMonitor() {
     <div class="panel"><h3>Shift report</h3><p style="margin-top:8px"><b>${esc(b.headline)}</b></p>
       <ul class="brief">${b.points.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>
       ${b.actions.length ? `<h3 style="margin:14px 0 8px">Do first</h3><ul class="tips">${b.actions.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}</div>
+    <div class="panel"><h3>Ask the copilot</h3>
+      <div class="chips" style="margin-top:10px">${["What happened recently?", "What should I do first?", "Any possible zero-days?", "Which services are being attacked?", "Can I trust the log?"].map((q) => `<button class="chip" data-q="${q}">${q}</button>`).join("")}</div>
+      <form class="ask" id="ask-form"><input id="ask-q" maxlength="300" placeholder="Ask about the traffic this service has scored" aria-label="Question"><button class="btn primary">Ask</button></form>
+      <div id="ask-out"></div></div>
     <div class="panel"><h3 style="margin-bottom:10px">Input drift against training data</h3>${drift}</div>
     <div class="panel table-wrap"><h3 style="margin-bottom:10px">Latest predictions in the log</h3>
       ${r.items.length ? `<table><thead><tr><th>Time (UTC)</th><th>Request</th><th>Connection</th><th>Verdict</th><th class="num">Risk</th></tr></thead><tbody>${r.items.map((e) => `<tr><td class="mono">${esc(e.ts.slice(11, 19))}</td><td class="mono">${esc(e.request_id)}</td><td class="mono">${esc(e.input.protocol_type)}/${esc(e.input.service)} ${esc(e.input.flag)}</td><td><span class="tag ${e.output.verdict}">${VERDICT[e.output.verdict]}</span></td><td class="num">${e.output.risk_score}</td></tr>`).join("")}</tbody></table>`
       : `<p class="muted">Nothing scored since the service started.</p>`}</div>`;
 }
+async function ask(q) {
+  if (!q || q.length < 3) return;
+  $("#ask-out").innerHTML = `<div class="answer muted">Thinking...</div>`;
+  const r = await api("/copilot", { question: q }).catch(() => null);
+  $("#ask-out").innerHTML = r ? `<div class="answer">${esc(r.answer)}<p class="note">${r.engine === "llm" ? "Answered by the configured LLM (" + esc(r.model) + ") from a summary of the log." : "Answered by the built-in rules. Set LLM_BASE_URL to use Ollama or another OpenAI-compatible model."}</p></div>` : `<div class="error-box"><b>The copilot did not answer.</b> Check that the service is running.</div>`;
+}
+document.addEventListener("click", (e) => { const b = e.target.closest("[data-q]"); if (b) { $("#ask-q").value = b.dataset.q; ask(b.dataset.q); } });
+document.addEventListener("submit", (e) => { if (e.target.id === "ask-form") { e.preventDefault(); ask($("#ask-q").value.trim()); } });
 $("#monitor-refresh").onclick = loadMonitor;
 
 // ---------- boot ----------
