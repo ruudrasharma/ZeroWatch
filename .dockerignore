@@ -1,0 +1,14 @@
+# keep the build context to what the serving image needs
+*
+!requirements-serve.txt
+!app.py
+!features.py
+!drift_check.py
+!learning.py
+!model/model.joblib
+!model/metrics.json
+!model/model.sha256
+!model/train_cache.npz
+!model/experiments.json
+!static/
+!data/sample_flows.json

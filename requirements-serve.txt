@@ -1,0 +1,8 @@
+# Lean serving runtime: what the Docker image installs. No MLflow, pandas or pytest.
+fastapi==0.163.0
+uvicorn==0.54.0
+pydantic==2.14.3
+scikit-learn==1.9.1
+numpy==2.4.6
+joblib==1.6.0
+prometheus-client==0.26.0

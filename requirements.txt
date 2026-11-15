@@ -1,0 +1,6 @@
+# Full development + training environment (superset of requirements-serve.txt).
+-r requirements-serve.txt
+pandas==3.1.1
+mlflow==3.18.0
+pytest==9.2.0
+httpx==0.28.1

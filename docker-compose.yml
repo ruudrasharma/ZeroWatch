@@ -51,6 +51,15 @@ services:
     depends_on:
       - backend
 
+  # ── ZeroWatch Serve: the lean graded service (root Dockerfile) ─────────────
+  #   docker compose up --build serve        -> http://localhost:8080
+  serve:
+    build: .
+    restart: unless-stopped
+    ports: ["8080:8000"]
+    volumes:
+      - ./logs:/app/logs
+
   # ── MLOps stack (opt-in):  docker compose --profile mlops up --build ───────
   mlflow:
     profiles: ["mlops"]

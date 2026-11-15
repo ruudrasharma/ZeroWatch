@@ -1,0 +1,58 @@
+{
+  "algorithm": "hgb",
+  "params": {
+    "algorithm": "hgb",
+    "learning_rate": 0.05,
+    "max_iter": 400,
+    "max_depth": 8,
+    "threshold": 0.5,
+    "contamination": 0.05,
+    "seed": 42,
+    "train_rows": 96993
+  },
+  "metrics": {
+    "validation": {
+      "accuracy": 0.9987,
+      "precision": 0.9995,
+      "recall": 0.9977,
+      "f1": 0.9986,
+      "fpr": 0.0005,
+      "roc_auc": 1.0
+    },
+    "test": {
+      "accuracy": 0.8117,
+      "precision": 0.9702,
+      "recall": 0.6849,
+      "f1": 0.8029,
+      "fpr": 0.0268,
+      "roc_auc": 0.9688
+    },
+    "ensemble_test": {
+      "accuracy": 0.8554,
+      "precision": 0.9483,
+      "recall": 0.7846,
+      "f1": 0.8587,
+      "fpr": 0.0545
+    },
+    "zero_day_recall": {
+      "detector_only": 0.4478,
+      "ensemble": 0.7671,
+      "unseen_attack_flows": 3533
+    },
+    "family_accuracy": 0.7523,
+    "conformal": {
+      "alpha": 0.05,
+      "qhat": 0.02,
+      "abstain_rate_test": 0.1341,
+      "accuracy_when_sure_test": 0.8833,
+      "missed_attacks_sent_to_review": 0.4851
+    }
+  },
+  "trained_at": "2026-11-15T08:48:41+00:00",
+  "git_sha": "c34c5f1",
+  "rows": {
+    "fit": 96993,
+    "validation": 24249,
+    "test": 21494
+  }
+}
