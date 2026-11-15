@@ -34,7 +34,7 @@ jobs:
 
       # API tests + browser tests of the console; the build fails under 85% coverage
       - name: Run tests
-        run: pytest -v --tb=short --cov=app --cov=learning --cov=store --cov=ops --cov=recon --cov=copilot --cov=pcap_flows --cov=drift_check --cov=features --cov-fail-under=85
+        run: pytest -v --tb=short --cov=app --cov=routes_hunt --cov=routes_ops --cov=routes_traffic --cov=learning --cov=store --cov=ops --cov=recon --cov=copilot --cov=pcap_flows --cov=drift_check --cov=features --cov-fail-under=85
 
       # informational: the sample log is an attack-heavy replay, so drift is expected
       - name: Drift check on the sample log

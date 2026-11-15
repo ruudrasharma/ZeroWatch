@@ -35,7 +35,7 @@ import pandas as pd
 import sklearn
 from sklearn.ensemble import HistGradientBoostingClassifier, IsolationForest
 from sklearn.inspection import permutation_importance
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
 
 from features import CAT_INDEX, CATEGORICAL, FAMILIES, FEATURES, TARGET, encode
@@ -176,6 +176,17 @@ def main(argv=None) -> dict:
                       "fpr": round(float(flag[y_test == 0].mean()), 4),
                       "precision": round(float(y_test[flag].mean()), 4)})
 
+    # evaluation detail for the Model tab (held-out KDDTest+, ensemble verdict at the chosen threshold)
+    tn, fp, fn, tp = confusion_matrix(y_test, ens_flag, labels=[0, 1]).ravel()
+    fam_test = test.attack_family.to_numpy()
+    detail = {
+        "confusion": {"tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn)},
+        "family_recall": {f: {"flows": int((fam_test == f).sum()), "caught": round(float(ens_flag[fam_test == f].mean()), 4),
+                              "caught_by_classifier": round(float(det_flag[fam_test == f].mean()), 4)} for f in FAMILIES},
+        "roc": [{"fpr": round(float(a_), 4), "tpr": round(float(b_), 4)}
+                for a_, b_ in zip(*roc_curve(y_test, p_test, drop_intermediate=True)[:2], strict=True)][::max(1, len(p_test) // 4000)][:60],
+    }
+
     # 4. attack family classifier (attack rows only)
     atk = fit_df[fit_df[TARGET] == 1]
     # boosted trees with balanced class weights: R2L and U2R are under 2% of the attack rows, and an
@@ -215,6 +226,7 @@ def main(argv=None) -> dict:
         "novelty": {"cut": cut, "spread": spread, "contamination": a.contamination},
         "conformal": {"alpha": alpha, "qhat": qhat},
         "threshold_curve": curve,
+        "evaluation": detail,
         "metrics": {"validation": val, "test": tst, "ensemble_test": ens, "zero_day_recall": zero_day,
                     "family_accuracy": family_acc, "conformal": conformal},
         "feature_stats": stats, "baseline": baseline, "feature_importance": importance,

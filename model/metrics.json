@@ -48,8 +48,8 @@
       "missed_attacks_sent_to_review": 0.4851
     }
   },
-  "trained_at": "2026-11-15T10:09:17+00:00",
-  "git_sha": "5605afe",
+  "trained_at": "2026-11-15T11:04:26+00:00",
+  "git_sha": "655a7e2",
   "rows": {
     "fit": 96993,
     "validation": 24249,

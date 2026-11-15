@@ -1,0 +1,6 @@
+Fonts in this folder are redistributed under the SIL Open Font License 1.1 (https://openfontlicense.org).
+
+IBM Plex Sans, IBM Plex Mono - Copyright (c) IBM Corp. - https://github.com/IBM/plex
+Bricolage Grotesque - Copyright (c) The Bricolage Grotesque Project Authors - https://github.com/ateliertriay/bricolage
+
+The files are subset to Latin characters; Bricolage Grotesque is limited to weights 500-700.

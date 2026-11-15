@@ -27,7 +27,15 @@ def sigma_rule(campaign_id: str, conditions: list[dict], size: int, false_match_
     """Sigma-format detection rule (https://sigmahq.io). Equality goes in `selection`, exclusions in
     `filter`, numeric comparisons use Sigma's |gt/|gte/|lt/|lte modifiers."""
     sel = [f"        {c['field']}{SIGMA_MOD.get(c['op'], '')}: {c['value']}" for c in conditions if c["op"] != "!="]
-    flt = [f"        {c['field']}: {c['value']}" for c in conditions if c["op"] == "!="]
+    # several exclusions on one field must be ONE key with a list (a list means "any of"),
+    # because repeating a key is not valid YAML
+    excluded: dict = {}
+    for c in conditions:
+        if c["op"] == "!=":
+            excluded.setdefault(c["field"], []).append(c["value"])
+    flt = []
+    for field, values in excluded.items():
+        flt += [f"        {field}: {values[0]}"] if len(values) == 1 else [f"        {field}:", *(f"            - {v}" for v in values)]
     lines = [
         f"title: ZeroWatch campaign {campaign_id}",
         f"id: {uuid.uuid5(uuid.NAMESPACE_URL, 'zerowatch/' + campaign_id)}",
@@ -44,6 +52,56 @@ def sigma_rule(campaign_id: str, conditions: list[dict], size: int, false_match_
         "level: high", "",
     ]
     return "\n".join(lines)
+
+
+def stix_bundle(campaign_id: str, rule_text: str, sigma: str, techniques: list[tuple[str, str]], size: int) -> dict:
+    """STIX 2.1 bundle: one indicator carrying the Sigma rule (pattern_type "sigma" is part of
+    the standard), the ATT&CK techniques it relates to, and the relationships between them."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+
+    def sid(kind: str, name: str) -> str:
+        return f"{kind}--{uuid.uuid5(uuid.NAMESPACE_URL, 'zerowatch/' + kind + '/' + name)}"
+
+    indicator = {"type": "indicator", "spec_version": "2.1", "id": sid("indicator", campaign_id), "created": now,
+                 "modified": now, "name": f"ZeroWatch campaign {campaign_id}", "indicator_types": ["anomalous-activity"],
+                 "description": f"Generated from {size} flows flagged as a possible zero-day. Rule: {rule_text}",
+                 "pattern": sigma, "pattern_type": "sigma", "valid_from": now}
+    objects = [indicator]
+    for tid, name in techniques:
+        ap = {"type": "attack-pattern", "spec_version": "2.1", "id": sid("attack-pattern", tid), "created": now,
+              "modified": now, "name": name,
+              "external_references": [{"source_name": "mitre-attack", "external_id": tid,
+                                       "url": f"https://attack.mitre.org/techniques/{tid}/"}]}
+        objects += [ap, {"type": "relationship", "spec_version": "2.1", "id": sid("relationship", campaign_id + tid),
+                         "created": now, "modified": now, "relationship_type": "indicates",
+                         "source_ref": indicator["id"], "target_ref": ap["id"]}]
+    return {"type": "bundle", "id": sid("bundle", campaign_id), "objects": objects}
+
+
+def blocklist(sources: list[dict]) -> dict:
+    """Firewall rules for the sources a capture showed scanning or flooding. Addresses come from
+    an uploaded file, so each is parsed as an IP address before it is put into a command."""
+    import ipaddress
+    bad = []
+    for s in sources:
+        if s["behaviour"] == "normal":
+            continue
+        try:
+            bad.append((str(ipaddress.ip_address(s["ip"])), s["behaviour"], s["flows"]))
+        except ValueError:
+            continue
+    if not bad:
+        return {"sources": [], "iptables": "", "nftables": ""}
+    ipt = ["# ZeroWatch block list. Review before applying; these rules drop ALL traffic from each source."]
+    ipt += [f"{'ip6tables' if ':' in ip else 'iptables'} -I INPUT -s {ip} -j DROP   # {role}, {n} flows" for ip, role, n in bad]
+    v4, v6 = [ip for ip, _, _ in bad if ":" not in ip], [ip for ip, _, _ in bad if ":" in ip]
+    nft = ["# ZeroWatch block list for nftables (table inet filter, chain input must exist)"]
+    if v4:
+        nft.append(f"nft add rule inet filter input ip saddr {{ {', '.join(v4)} }} drop")
+    if v6:
+        nft.append(f"nft add rule inet filter input ip6 saddr {{ {', '.join(v6)} }} drop")
+    return {"sources": [{"ip": ip, "behaviour": role, "flows": n} for ip, role, n in bad],
+            "iptables": "\n".join(ipt) + "\n", "nftables": "\n".join(nft) + "\n"}
 
 
 def incident_markdown(c: dict, techniques: list[tuple[str, str]], rule_test: dict, model_version: str, chain_head: str) -> str:
@@ -137,6 +195,10 @@ class Registry:
         st["versions"].append({"generation": gen, "file": path.name, "promoted_at": int(time.time()),
                                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "report": report})
         st["active"] = gen
+        # keep the five newest versions: older model files would otherwise pile up forever
+        for old in st["versions"][:-5]:
+            (self.dir / old["file"]).unlink(missing_ok=True)
+        st["versions"] = st["versions"][-5:]
         self._write(st)
         return gen
 
