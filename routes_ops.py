@@ -94,7 +94,7 @@ def feedback(fb: core.Feedback, role: str = core.analyst):
 
 @router.get("/alerts")
 def alerts_route(state: str = "open", limit: int = 200, _: str = core.analyst):
-    return core.list_alerts(state, limit)
+    return core.list_alerts(state, max(1, min(limit, 200)))
 
 
 @router.get("/alerts/{request_id}")
