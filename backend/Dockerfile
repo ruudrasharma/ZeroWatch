@@ -25,6 +25,10 @@ WORKDIR /app
 COPY --chown=zerowatch:zerowatch . .
 RUN mkdir -p data/exports data/pcaps data/processed data/raw models/checkpoints \
     && chown -R zerowatch:zerowatch data models
+# /app itself is root-owned, so the non-root user cannot create ./zerowatch.db there
+# (the container crashed at startup with "unable to open database file"). Keep the
+# database in data/, which is writable and is the directory docker-compose mounts.
+ENV DATABASE_URL=sqlite:////app/data/zerowatch.db
 USER zerowatch
 
 EXPOSE 8000
