@@ -25,6 +25,7 @@ frontend/.env.local
 
 # ─── Database (local state) ───
 *.db
+!mlflow.db
 *.sqlite
 *.sqlite3
 
@@ -67,6 +68,12 @@ htmlcov/
 # ─── Jupyter checkpoints ───
 .ipynb_checkpoints/
 
-# MLflow local store
+# MLflow artifacts (mlflow.db itself is committed so the run history can be opened)
 mlruns/
-mlflow.db
+
+# Raw NSL-KDD downloads (data/nsl_kdd.csv is the committed, processed file)
+data/KDD*.txt
+
+# Live prediction logs (a sample is committed as logs/sample_predictions.jsonl)
+logs/predictions.jsonl
+logs/feedback.jsonl

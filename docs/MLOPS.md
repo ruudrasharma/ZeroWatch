@@ -1,4 +1,7 @@
-# ZeroWatch — MLOps
+# ZeroWatch — MLOps (extended platform)
+
+> The graded end-term pipeline (root `train.py`, `app.py`, `Dockerfile`, CI/CD, Render deploy) is documented in the
+> top-level README. This page covers the MLOps layer of the local platform in `backend/` and `ml/`.
 
 How the BrainMentors MLOps workshop topics map onto ZeroWatch. Everything runs locally; the
 Render deployment from the workshop is intentionally skipped (the project is local-only by design).

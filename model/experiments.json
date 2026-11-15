@@ -1,0 +1,93 @@
+[
+  {
+    "run": "logreg-C1.0-max_iter500",
+    "algorithm": "logreg",
+    "hyperparameters": "C=1.0, max_iter=500",
+    "promoted": false,
+    "val_f1": 0.9704,
+    "test_accuracy": 0.7699,
+    "test_f1": 0.7549,
+    "ensemble_test_f1": 0.8292,
+    "ensemble_test_fpr": 0.0658,
+    "zero_day_recall_detector": 0.4226,
+    "zero_day_recall_ensemble": 0.7656
+  },
+  {
+    "run": "rf-n_estimators100-max_depth6",
+    "algorithm": "rf",
+    "hyperparameters": "max_depth=6, n_estimators=100",
+    "promoted": false,
+    "val_f1": 0.9878,
+    "test_accuracy": 0.7777,
+    "test_f1": 0.7584,
+    "ensemble_test_f1": 0.8459,
+    "ensemble_test_fpr": 0.0527,
+    "zero_day_recall_detector": 0.3043,
+    "zero_day_recall_ensemble": 0.7605
+  },
+  {
+    "run": "rf-n_estimators200-max_depth12",
+    "algorithm": "rf",
+    "hyperparameters": "max_depth=12, n_estimators=200",
+    "promoted": false,
+    "val_f1": 0.9976,
+    "test_accuracy": 0.7827,
+    "test_f1": 0.7658,
+    "ensemble_test_f1": 0.8455,
+    "ensemble_test_fpr": 0.0555,
+    "zero_day_recall_detector": 0.3397,
+    "zero_day_recall_ensemble": 0.7603
+  },
+  {
+    "run": "rf-n_estimators300-max_depth20",
+    "algorithm": "rf",
+    "hyperparameters": "max_depth=20, n_estimators=300",
+    "promoted": false,
+    "val_f1": 0.9982,
+    "test_accuracy": 0.7733,
+    "test_f1": 0.7535,
+    "ensemble_test_f1": 0.8455,
+    "ensemble_test_fpr": 0.0568,
+    "zero_day_recall_detector": 0.2845,
+    "zero_day_recall_ensemble": 0.7614
+  },
+  {
+    "run": "extratrees-n_estimators200-max_depth16",
+    "algorithm": "extratrees",
+    "hyperparameters": "max_depth=16, n_estimators=200",
+    "promoted": false,
+    "val_f1": 0.9944,
+    "test_accuracy": 0.777,
+    "test_f1": 0.7581,
+    "ensemble_test_f1": 0.8457,
+    "ensemble_test_fpr": 0.0535,
+    "zero_day_recall_detector": 0.3054,
+    "zero_day_recall_ensemble": 0.7594
+  },
+  {
+    "run": "hgb-learning_rate0.1-max_iter200-max_depth6",
+    "algorithm": "hgb",
+    "hyperparameters": "learning_rate=0.1, max_depth=6, max_iter=200",
+    "promoted": false,
+    "val_f1": 0.9985,
+    "test_accuracy": 0.8114,
+    "test_f1": 0.8024,
+    "ensemble_test_f1": 0.8568,
+    "ensemble_test_fpr": 0.0533,
+    "zero_day_recall_detector": 0.4546,
+    "zero_day_recall_ensemble": 0.7688
+  },
+  {
+    "run": "hgb-learning_rate0.05-max_iter400-max_depth8",
+    "algorithm": "hgb",
+    "hyperparameters": "learning_rate=0.05, max_depth=8, max_iter=400",
+    "promoted": true,
+    "val_f1": 0.9986,
+    "test_accuracy": 0.8117,
+    "test_f1": 0.8029,
+    "ensemble_test_f1": 0.8587,
+    "ensemble_test_fpr": 0.0545,
+    "zero_day_recall_detector": 0.4478,
+    "zero_day_recall_ensemble": 0.7671
+  }
+]
