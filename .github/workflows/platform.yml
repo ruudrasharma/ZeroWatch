@@ -106,7 +106,7 @@ jobs:
             curl -fs http://localhost:8000/ready && break
             sleep 3
           done
-          curl -fs http://localhost:8000/health
+          curl -fs http://localhost:8000/health || (docker logs zw 2>&1 | tail -60; exit 1)
           curl -fs http://localhost:8000/metrics | grep -q zerowatch_models_loaded
           docker logs zw | tail -20
 
