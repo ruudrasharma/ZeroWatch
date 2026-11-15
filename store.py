@@ -36,6 +36,10 @@ class ChainLog:
         body = {k: v for k, v in entry.items() if k not in ("hash", "prev")}
         return hashlib.sha256((prev + json.dumps(body, sort_keys=True)).encode()).hexdigest()
 
+    def _rotated_name(self) -> Path:
+        # nanoseconds: two rotations in the same second must not overwrite each other
+        return self.path.with_name(f"{self.path.stem}-{time.time_ns()}{self.path.suffix}")
+
     def _load(self) -> dict:
         if self._state is None:
             try:
@@ -59,7 +63,7 @@ class ChainLog:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 if self.path.exists() and self.path.stat().st_size > self.max_bytes:
-                    self.path.rename(self.path.with_name(f"{self.path.stem}-{int(time.time())}{self.path.suffix}"))
+                    self.path.rename(self._rotated_name())
                     st["genesis"], st["entries"] = st["head"], 0
                 entry["prev"] = st["head"]
                 entry["hash"] = self._hash(st["head"], entry)
@@ -71,11 +75,40 @@ class ChainLog:
                 pass
         return entry
 
+    def append_many(self, entries: list[dict]) -> None:
+        """Same as append() for a batch, but with one file write and one anchor update."""
+        if not entries:
+            return
+        with self.lock:
+            st = self._load()
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                if self.path.exists() and self.path.stat().st_size > self.max_bytes:
+                    self.path.rename(self._rotated_name())
+                    st["genesis"], st["entries"] = st["head"], 0
+                head, lines = st["head"], []
+                for entry in entries:
+                    entry["prev"] = head
+                    entry["hash"] = head = self._hash(head, entry)
+                    lines.append(json.dumps(entry))
+                with self.path.open("a") as f:
+                    f.write("\n".join(lines) + "\n")
+                st["head"], st["entries"] = head, st["entries"] + len(entries)
+                self.anchor_path.write_text(json.dumps(st))
+            except OSError:
+                pass
+
     def read(self, last: int = 3000) -> list[dict]:
-        if not self.path.exists():
-            return []
+        """The newest `last` entries, oldest first. Reaches back into rotated files when the
+        current one is short, so triage state and hunting survive a rotation."""
+        files = sorted(self.path.parent.glob(f"{self.path.stem}-*{self.path.suffix}"), reverse=True)
+        lines: list[str] = []
+        for f in [self.path, *files]:
+            if len(lines) >= last or not f.exists():
+                continue
+            lines = f.read_text().splitlines()[-(last - len(lines)):] + lines
         out = []
-        for line in self.path.read_text().splitlines()[-last:]:
+        for line in lines:
             try:
                 out.append(json.loads(line))
             except ValueError:

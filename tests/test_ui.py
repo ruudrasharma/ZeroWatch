@@ -109,10 +109,49 @@ def test_capture_table_filters_and_queue_triage(browser, server):
     page.click("#cap-sample")
     page.wait_for_selector("#cap-table tbody tr")
     page.fill("#cap-table input[type=search]", "10.0.0.66")
-    page.wait_for_function("[...document.querySelectorAll('#cap-table tbody tr')].every(r => r.innerText.includes('10.0.0.66'))")
+    page.wait_for_function("() => [...document.querySelectorAll('#cap-table tbody tr')].every(r => r.innerText.includes('10.0.0.66'))")
     page.click("#tab-queue")
     page.wait_for_selector("#queue-table select")
     page.select_option("#queue-table select >> nth=0", "confirmed")
     page.wait_for_selector(".toast")
     assert "labelled as an attack" in page.inner_text(".toast")
     assert errors == []
+
+
+def test_keyboard_live_stream_and_shadow_controls(browser, server):
+    page, errors = open_page(browser, server)
+    page.focus("#tab-analyze")
+    page.keyboard.press("ArrowRight")
+    assert page.url.endswith("#live") and page.evaluate("document.activeElement.id") == "tab-live"
+    page.click("#live-toggle")  # server-sent events, no polling
+    page.wait_for_function("() => document.querySelectorAll('#live-rows tr.click').length >= 8")
+    page.click("#live-toggle")
+    assert page.evaluate("document.querySelectorAll('#trace i').length") >= 8
+    page.click("#live-reset")
+    assert page.inner_text("#live-stats .stat b") == "0"
+    page.keyboard.press("9")  # digit shortcut -> Model
+    page.wait_for_selector("#model-out .matrix")
+    assert page.url.endswith("#model") and page.is_visible("#model-out .roc")
+    assert errors == []
+
+
+def test_no_third_party_requests_and_csp_holds(browser, server):
+    page = browser.new_context().new_page()
+    outside, blocked = [], []
+    page.on("request", lambda r: outside.append(r.url) if not r.url.startswith(server) else None)
+    page.on("console", lambda m: blocked.append(m.text) if "Content Security Policy" in m.text else None)
+    page.goto(server)
+    page.wait_for_selector("#presets .chip")
+    page.click("#presets .chip:nth-child(2)")
+    page.wait_for_selector(".verdict")
+    assert outside == [], "fonts and scripts must come from this origin"
+    assert blocked == [], "nothing on the page may violate the Content-Security-Policy"
+    assert page.evaluate("document.fonts.check('16px \\'IBM Plex Sans\\'')")
+
+
+def test_result_scrolls_into_view_on_a_phone(browser, server):
+    page, _ = open_page(browser, server, viewport={"width": 390, "height": 844})
+    page.click("#presets .chip:nth-child(2)")
+    page.wait_for_selector(".verdict")
+    page.wait_for_function("() => document.querySelector('#result').getBoundingClientRect().top < innerHeight")
+    assert page.evaluate("Math.min(...[...document.querySelectorAll('.tabs button')].map(b => b.getBoundingClientRect().height))") >= 44

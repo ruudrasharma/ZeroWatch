@@ -22,6 +22,9 @@ Routes
   GET  /campaigns/{id}/rule | /rule/test | /report   Sigma rule, its hits on the log, incident report
   POST /learning/rollback, GET /learning/status      saved model versions
   POST /settings/threshold, POST /monitoring/alarm/test, GET /audit/actions
+  GET  /simulate/stream     the replay as Server-Sent Events
+  POST /learning/retrain {"mode": "shadow"}, GET|DELETE /learning/shadow, POST /learning/shadow/promote
+  GET  /campaigns/{id}/stix STIX 2.1 bundle
 
 Roles: set ANALYST_TOKEN and ADMIN_TOKEN to require an X-API-Key on every route that changes state.
   GET  /simulate            replay labelled held-out flows through the model
@@ -52,18 +55,17 @@ import joblib
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
 
 import pcap_flows
 import recon
-from copilot import answer as copilot_answer
 from drift_check import drift_report, read_inputs
 from features import CONTRACT, FEATURES, FLAGS, PROTOCOLS, SERVICES, encode
-from learning import find_campaigns, red_team, retrain
-from ops import Registry, incident_markdown, match_rule, send_webhook, sigma_rule
+from learning import retrain
+from ops import Registry, blocklist, match_rule, send_webhook
 from store import ChainLog
 
 ROOT = Path(__file__).resolve().parent
@@ -78,6 +80,10 @@ RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MIN", "600"))
 # roll back, change the threshold and manage assets.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 ANALYST_TOKEN = os.getenv("ANALYST_TOKEN", "")
+# Named accounts so the action log says who acted: USERS="asha:analyst:<key>,ravi:admin:<key>"
+USERS = {tok: (name, role) for name, role, tok in
+         (u.split(":", 2) for u in os.getenv("USERS", "").split(",") if u.count(":") >= 2) if role in ("analyst", "admin")}
+DOCS_ENABLED = os.getenv("DOCS_ENABLED", "1") == "1"
 TRUST_PROXY = os.getenv("TRUST_PROXY", "0") == "1"  # only then is X-Forwarded-For believed
 REAL_SOURCES = {"api", "batch", "capture"}          # replay and the bundled sample are demo traffic
 PRED_LOG = ChainLog(LOG_FILE, int(os.getenv("LOG_MAX_BYTES", "5000000")))
@@ -307,19 +313,35 @@ def summarise(flow: dict, verdict: str, risk: int, family: str | None, factors: 
     return f"{conn} scored {risk}/100 and is consistent with normal traffic."
 
 
-def analyse(flow: dict, with_explanation: bool = True, log: bool = True, truth: str | None = None,
-            source: str = "api") -> dict:
-    t0 = time.perf_counter()
-    x = encode(flow)
-    p, nov = (float(v[0]) for v in score_matrix(np.array([x])))
+SHADOW = {"detector": None, "since": None, "report": None, "stats": None}
+
+
+def _shadow_observe(X: np.ndarray, p_live: np.ndarray, truths: list) -> None:
+    """Shadow mode: the challenger scores the same traffic as the live model, but its answers
+    are only counted, never returned. Disagreements show what promoting it would change."""
+    det = SHADOW["detector"]
+    if det is None:
+        return
+    live, shadow = p_live >= THRESHOLD, det.predict_proba(X)[:, 1] >= THRESHOLD
+    st = SHADOW["stats"]
+    st["flows"] += len(X)
+    st["agree"] += int((live == shadow).sum())
+    for lv, sh, truth in zip(live, shadow, truths, strict=True):
+        if lv == sh:
+            continue
+        side = "only_shadow_flags" if sh else "only_live_flags"
+        st[side] += 1
+        if truth is not None:
+            st[side + ("_true_normal" if truth == "normal" else "_true_attack")] += 1
+
+
+def _build(flow: dict, p: float, nov: float, fam_row, factors: list, t0: float) -> dict:
     verdict, risk, severity = fuse(p, nov)
     family, fam_probs = None, {}
-    if verdict != "benign":
-        probs = FAMILY.predict_proba(np.array([x]))[0]
-        fam_probs = {c: round(float(v), 3) for c, v in zip(FAMILY.classes_, probs, strict=False)}
+    if fam_row is not None:
+        fam_probs = {c: round(float(v), 3) for c, v in zip(FAMILY.classes_, fam_row, strict=False)}
         if verdict == "attack":
             family = max(fam_probs, key=fam_probs.get)
-    factors = explain(flow, x, verdict, p, nov) if with_explanation else []
     result = {
         "request_id": uuid.uuid4().hex[:12],
         "verdict": verdict, "risk_score": risk, "severity": severity,
@@ -337,25 +359,71 @@ def analyse(flow: dict, with_explanation: bool = True, log: bool = True, truth: 
         result["asset_context"] = {"asset": asset["name"], "exposure": asset["exposure"], "grade": asset["grade"],
                                    "priority": recon.priority(risk, asset["exposure"]),
                                    "top_finding": asset["findings"][0]["text"] if asset["findings"] else None}
+    return result
+
+
+def analyse(flow: dict, with_explanation: bool = True, log: bool = True, truth: str | None = None,
+            source: str = "api") -> dict:
+    """Score one flow, with its explanation."""
+    t0 = time.perf_counter()
+    x = encode(flow)
+    X = np.array([x])
+    ps, novs = score_matrix(X)
+    p, nov = float(ps[0]), float(novs[0])
+    verdict = fuse(p, nov)[0]
+    fam_row = FAMILY.predict_proba(X)[0] if verdict != "benign" else None
+    factors = explain(flow, x, verdict, p, nov) if with_explanation else []
+    result = _build(flow, p, nov, fam_row, factors, t0)
     if log:  # what-if and red-team probes are not real traffic: keep them out of the log and metrics
         LATENCY.observe(time.perf_counter() - t0)
         PREDICTIONS.labels(verdict).inc()
-        RISK.observe(risk)
+        RISK.observe(result["risk_score"])
+        _shadow_observe(X, ps, [truth])
         log_prediction(flow, result, truth, source)
     return result
+
+
+def analyse_many(flows: list[dict], source: str, truths: list | None = None, log: bool = True) -> list[dict]:
+    """Score many flows with ONE call to each model. Scoring them one by one made a 500-flow
+    batch take 10 s and a 3,000-connection capture 40 s; this is about 100 times faster."""
+    if not flows:
+        return []
+    t0 = time.perf_counter()
+    truths = truths or [None] * len(flows)
+    X = np.array([encode(f) for f in flows])
+    ps, novs = score_matrix(X)
+    flagged = [i for i in range(len(flows)) if fuse(float(ps[i]), float(novs[i]))[0] != "benign"]
+    fam = dict(zip(flagged, FAMILY.predict_proba(X[flagged]), strict=True)) if flagged else {}
+    results = [_build(f, float(ps[i]), float(novs[i]), fam.get(i), [], t0) for i, f in enumerate(flows)]
+    if log:
+        LATENCY.observe((time.perf_counter() - t0) / len(flows))
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        entries = []
+        for f, r, truth in zip(flows, results, truths, strict=True):
+            PREDICTIONS.labels(r["verdict"]).inc()
+            RISK.observe(r["risk_score"])
+            entries.append(_log_entry(f, r, truth, source, now))
+        _shadow_observe(X, ps, truths)
+        PRED_LOG.append_many(entries)
+        RECENT.extendleft(entries)
+    return results
+
+
+def _log_entry(flow: dict, result: dict, truth: str | None, source: str, ts: str) -> dict:
+    entry = {"ts": ts, "request_id": result["request_id"], "source": source, "input": flow,
+             "output": {k: result[k] for k in ("verdict", "risk_score", "attack_probability",
+                                               "novelty_score", "attack_family")},
+             "model_version": result["model_version"]}
+    if truth:
+        entry["truth"] = truth  # only the labelled replay knows the real answer
+    return entry
 
 
 def log_prediction(flow: dict, result: dict, truth: str | None = None, source: str = "api") -> None:
     """Stage 8: every prediction input is appended to a JSON-lines file for drift checks.
     The file is hash-chained and rotated by store.ChainLog. `source` separates real traffic
     (api, batch, capture) from demo traffic (replay, capture-sample) so demos cannot fake drift."""
-    entry = {"ts": datetime.now(UTC).isoformat(timespec="seconds"),
-             "request_id": result["request_id"], "source": source, "input": flow,
-             "output": {k: result[k] for k in ("verdict", "risk_score", "attack_probability",
-                                               "novelty_score", "attack_family")},
-             "model_version": result["model_version"]}
-    if truth:
-        entry["truth"] = truth  # only the labelled replay knows the real answer
+    entry = _log_entry(flow, result, truth, source, datetime.now(UTC).isoformat(timespec="seconds"))
     PRED_LOG.append(entry)
     RECENT.appendleft(entry)
 
@@ -373,25 +441,37 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "?"
 
 
-def role_of(request: Request) -> str:
-    if not ADMIN_TOKEN and not ANALYST_TOKEN:
-        return "admin"  # open mode
+def identity(request: Request) -> tuple[str, str]:
+    """(role, user) for this request. Keys are compared in constant time."""
+    if not ADMIN_TOKEN and not ANALYST_TOKEN and not USERS:
+        return "admin", "open-mode"
     key = request.headers.get("x-api-key", "")
+    for tok, (name, role) in USERS.items():
+        if hmac.compare_digest(key, tok):
+            return role, name
     if ADMIN_TOKEN and hmac.compare_digest(key, ADMIN_TOKEN):
-        return "admin"
+        return "admin", "admin"
     if ANALYST_TOKEN and hmac.compare_digest(key, ANALYST_TOKEN):
-        return "analyst"
-    return "viewer"
+        return "analyst", "analyst"
+    return "viewer", "anonymous"
+
+
+def role_of(request: Request) -> str:
+    return identity(request)[0]
+
+
+def open_mode() -> bool:
+    return not ADMIN_TOKEN and not ANALYST_TOKEN and not USERS
 
 
 def require(minimum: str):
     def check(request: Request) -> str:
-        role = role_of(request)
+        role, user = identity(request)
         if role == "viewer":
-            raise HTTPException(401, "This action needs an API key. Send it in the X-API-Key header.")
+            raise HTTPException(401, "This needs an API key. Send it in the X-API-Key header.")
         if minimum == "admin" and role != "admin":
-            raise HTTPException(403, "This action needs the admin key; the analyst key is not enough.")
-        return role
+            raise HTTPException(403, "This action needs an admin key; an analyst key is not enough.")
+        return f"{role}/{user}"
     return check
 
 
@@ -399,8 +479,9 @@ analyst = Depends(require("analyst"))
 admin = Depends(require("admin"))
 
 
-def audit(role: str, action: str, **detail) -> None:
-    AUDIT_LOG.append({"ts": datetime.now(UTC).isoformat(timespec="seconds"), "role": role,
+def audit(actor: str, action: str, **detail) -> None:
+    role, _, user = actor.partition("/")
+    AUDIT_LOG.append({"ts": datetime.now(UTC).isoformat(timespec="seconds"), "role": role, "user": user or role,
                       "action": action, "detail": detail})
 
 
@@ -434,6 +515,7 @@ def _alarm_loop(stop: threading.Event) -> None:
     while not stop.wait(ALARM_INTERVAL):
         try:
             check_alarm()
+            auto_retrain()
         except Exception:  # noqa: BLE001 - the watchdog must never die
             pass
 
@@ -449,7 +531,8 @@ async def lifespan(_: FastAPI):
     stop.set()
 
 
-app = FastAPI(title="ZeroWatch", version="2.0.0", lifespan=lifespan,
+app = FastAPI(title="ZeroWatch", version="3.0.0", lifespan=lifespan, docs_url="/docs" if DOCS_ENABLED else None,
+              redoc_url=None, openapi_url="/openapi.json" if DOCS_ENABLED else None,
               description="AI-based zero-day attack detection: supervised detector + novelty model, "
                           "with explanations, drift monitoring and a validated data contract.")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -485,12 +568,27 @@ async def guard(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if not request.url.path.startswith(("/docs", "/openapi")):  # Swagger UI loads its script from a CDN
+        # scripts only from this origin: an injected <script> or inline handler cannot run and steal the API key
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+    if TRUST_PROXY:  # served over HTTPS behind the platform's proxy
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if "json" in response.headers.get("content-type", ""):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
 @app.get("/", include_in_schema=False)
 def ui():
     return FileResponse(ROOT / "static" / "index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(ROOT / "static" / "favicon.svg", media_type="image/svg+xml")
 
 
 @app.get("/health")
@@ -507,55 +605,26 @@ def predict(flow: Flow):
 
 @app.post("/predict/batch")
 def predict_batch(batch: Batch):
-    results = [analyse(f.model_dump(), with_explanation=False, source="batch") for f in batch.flows]
+    results = analyse_many([f.model_dump() for f in batch.flows], "batch")
     counts = {}
     for r in results:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
     return {"count": len(results), "verdicts": counts, "results": results}
 
 
-@app.post("/counterfactual")
-def counterfactual(flow: Flow):
-    """Greedy what-if: keep resetting the most incriminating feature to its
-    normal value until the flow would pass. Shows the analyst what actually
-    separates this flow from benign traffic."""
-    cur = flow.model_dump()
-    first = analyse(cur, with_explanation=False, log=False)
-    if first["verdict"] == "benign":
-        return {"already_benign": True, "changes": [], "final_risk": first["risk_score"]}
-    changes, risk, verdict = [], first["risk_score"], first["verdict"]
-    for _ in range(8):
-        x = encode(cur)
-        p, nov = (float(v[0]) for v in score_matrix(np.array([x])))
-        verdict, risk, _sev = fuse(p, nov)
-        if verdict == "benign":
-            break
-        factors = [f for f in explain(cur, x, verdict, p, nov) if f["impact"] > 0]
-        if not factors:
-            break
-        f = factors[0]
-        changes.append({"feature": f["feature"], "from": f["value"], "to": f["typical"]})
-        cur[f["feature"]] = f["typical"]
-    else:
-        x = encode(cur)
-        p, nov = (float(v[0]) for v in score_matrix(np.array([x])))
-        verdict, risk, _sev = fuse(p, nov)
-    return {"already_benign": False, "changes": changes, "flips_to_benign": verdict == "benign",
-            "start_risk": first["risk_score"], "final_risk": risk}
+def _replay(n: int, log: bool) -> list[dict]:
+    picked = random.sample(SAMPLES["flows"], n)
+    results = analyse_many([s["flow"] for s in picked], "replay", [s["label"] for s in picked], log=log)
+    return [{"flow": s["flow"], "truth": {k: s[k] for k in ("label", "family", "seen_in_training")},
+             "result": {k: r[k] for k in ("request_id", "verdict", "risk_score", "severity",
+                                          "attack_family", "attack_probability", "novelty_score")}}
+            for s, r in zip(picked, results, strict=True)]
 
 
-@app.get("/simulate")
-def simulate(n: int = 12):
-    """Replays held-out KDDTest+ flows (true labels attached) through the live model."""
-    if not 1 <= n <= 60:
-        raise HTTPException(422, "n must be between 1 and 60")
-    out = []
-    for s in random.sample(SAMPLES["flows"], n):
-        r = analyse(s["flow"], with_explanation=False, truth=s["label"], source="replay")
-        out.append({"flow": s["flow"], "truth": {k: s[k] for k in ("label", "family", "seen_in_training")},
-                    "result": {k: r[k] for k in ("request_id", "verdict", "risk_score", "severity",
-                                                 "attack_family", "attack_probability", "novelty_score")}})
-    return {"events": out}
+def _may_log_demo(request: Request) -> bool:
+    """With keys configured, replayed and sample traffic from a visitor WITHOUT a key is scored
+    but not written to the log, so an anonymous visitor cannot fill the disk or seed the hunt."""
+    return role_of(request) != "viewer"
 
 
 @app.get("/contract")
@@ -572,33 +641,11 @@ def model_info():
             "learning": {k: v for k, v in LEARNING.items() if k != "detector"},
             **{k: META[k] for k in ("algorithm", "params", "metrics", "trained_at", "git_sha", "sklearn",
                                     "rows", "feature_importance", "data_sha256")},
-            "threshold_curve": META.get("threshold_curve", []), "qhat": QHAT,
+            "threshold_curve": META.get("threshold_curve", []), "qhat": QHAT, "evaluation": META.get("evaluation"),
             "cross_dataset": json.loads((ROOT / "model" / "cross_dataset.json").read_text())
             if (ROOT / "model" / "cross_dataset.json").exists() else None,
             "experiments": json.loads((ROOT / "model" / "experiments.json").read_text())
             if (ROOT / "model" / "experiments.json").exists() else []}
-
-
-@app.get("/monitoring/drift")
-def monitoring_drift(last: int = 2000):
-    """Only real traffic counts (api, batch, uploaded captures); the replay and the sample capture are excluded."""
-    return drift_report(read_inputs(LOG_FILE, max(30, min(last, 10000))), META["feature_stats"])
-
-
-@app.get("/monitoring/recent")
-def monitoring_recent(limit: int = 50):
-    items = list(RECENT)[:max(1, min(limit, 300))]
-    counts = {}
-    for e in RECENT:
-        v = e["output"]["verdict"]
-        counts[v] = counts.get(v, 0) + 1
-    return {"total_in_memory": len(RECENT), "verdicts": counts, "items": items}
-
-
-@app.post("/redteam")
-def redteam(flow: Flow):
-    """Adversarial robustness: fewest attacker-controllable changes that make the flow pass."""
-    return red_team(flow.model_dump(), META["feature_stats"], BASELINE, judge)
 
 
 def current_suspects() -> list[dict]:
@@ -637,12 +684,30 @@ def _labelled_counts() -> dict:
     return {"attack": sum(r["label"] == "attack" for r in rows), "benign": sum(r["label"] == "benign" for r in rows)}
 
 
+def _write_labels(rows: list[dict]) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    LABEL_FILE.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
 def _add_labels(rows: list[dict]) -> None:
+    """One label per flow, the newest wins. Otherwise a flow marked benign twice and then confirmed
+    as an attack would enter training three times with contradictory answers."""
     with _log_lock:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with LABEL_FILE.open("a") as f:
-            for r in rows:
-                f.write(json.dumps(r) + "\n")
+        current = {json.dumps(r["input"], sort_keys=True): r for r in _read_labelled()}
+        for r in rows:
+            key = json.dumps(r["input"], sort_keys=True)
+            current.pop(key, None)  # re-insert at the end: newest last
+            current[key] = r
+        _write_labels(list(current.values()))
+
+
+def _remove_labels(match) -> int:
+    with _log_lock:
+        rows = _read_labelled()
+        keep = [r for r in rows if not match(r)]
+        if len(keep) != len(rows):
+            _write_labels(keep)
+        return len(rows) - len(keep)
 
 
 def _rule_test(conditions: list[dict]) -> dict:
@@ -657,77 +722,6 @@ def _rule_test(conditions: list[dict]) -> dict:
             "matched_true_attack": sum(e.get("truth") not in (None, "normal") for e in hits)}
 
 
-@app.get("/campaigns")
-def campaigns():
-    if NORMAL_REF is None:
-        raise HTTPException(503, "model/train_cache.npz is missing; run train.py")
-    suspects = current_suspects()
-    found = find_campaigns(suspects, NORMAL_REF)
-    CAMPAIGNS.clear()
-    CAMPAIGNS.update({c["id"]: c for c in found})
-    done: dict = {}
-    for r in _read_labelled():
-        if r.get("campaign"):
-            d = done.setdefault(r["campaign"], {"id": r["campaign"], "label": r["label"], "flows": 0, "rule": r.get("rule")})
-            d["flows"] += 1
-    return {"suspects": len(suspects), "campaigns": [{k: v for k, v in c.items() if k != "flows"} | {
-        "example": c["flows"][0]} for c in found], "labelled": _labelled_counts(), "labelled_campaigns": list(done.values())}
-
-
-class CampaignLabel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    label: Literal["attack", "benign"]
-
-
-@app.post("/campaigns/{campaign_id}/label")
-def label_campaign(campaign_id: str, body: CampaignLabel, role: str = analyst):
-    c = _campaign(campaign_id)
-    _add_labels([{"input": flow, "label": body.label, "campaign": campaign_id, "rule": c["signature"]["rule"]}
-                 for flow in c["flows"]])
-    audit(role, "label_campaign", campaign=campaign_id, label=body.label, flows=len(c["flows"]))
-    return {"labelled": len(c["flows"]), "label": body.label, "totals": _labelled_counts()}
-
-
-@app.delete("/campaigns/{campaign_id}/label")
-def unlabel_campaign(campaign_id: str, role: str = analyst):
-    """Undo: drop this campaign's labels so its flows return to the hunt."""
-    rows = _read_labelled()
-    keep = [r for r in rows if r.get("campaign") != campaign_id]
-    if len(keep) == len(rows):
-        raise HTTPException(404, "No labels are stored for that campaign.")
-    with _log_lock:
-        LABEL_FILE.write_text("".join(json.dumps(r) + "\n" for r in keep))
-    audit(role, "unlabel_campaign", campaign=campaign_id, flows=len(rows) - len(keep))
-    return {"removed": len(rows) - len(keep), "totals": _labelled_counts()}
-
-
-@app.get("/campaigns/{campaign_id}/rule", response_class=PlainTextResponse)
-def campaign_rule(campaign_id: str):
-    """The generated rule in Sigma format (text/yaml)."""
-    c = _campaign(campaign_id)
-    sig = c["signature"]
-    return PlainTextResponse(sigma_rule(campaign_id, sig["conditions"], c["size"], sig["false_match_rate"]),
-                             media_type="text/yaml",
-                             headers={"content-disposition": f'attachment; filename="zerowatch-{campaign_id}.yml"'})
-
-
-@app.get("/campaigns/{campaign_id}/rule/test")
-def campaign_rule_test(campaign_id: str):
-    return _rule_test(_campaign(campaign_id)["signature"]["conditions"])
-
-
-@app.get("/campaigns/{campaign_id}/report", response_class=PlainTextResponse)
-def campaign_report(campaign_id: str):
-    """Incident report for one campaign, as Markdown."""
-    c = _campaign(campaign_id)
-    X = np.array([encode(f) for f in c["flows"]])
-    fam = max(set(FAMILY.predict(X)), key=list(FAMILY.predict(X)).count)
-    text = incident_markdown(c, MITRE.get(fam, []), _rule_test(c["signature"]["conditions"]), model_version(),
-                             PRED_LOG.head[:16])
-    return PlainTextResponse(text, media_type="text/markdown",
-                             headers={"content-disposition": f'attachment; filename="incident-{campaign_id}.md"'})
-
-
 def _activate(generation: int) -> None:
     global DETECTOR
     DETECTOR = BASE_DETECTOR if generation == 0 else REGISTRY.load(generation)
@@ -735,66 +729,21 @@ def _activate(generation: int) -> None:
     GENERATION.set(generation)
 
 
-@app.post("/learning/retrain")
-def learning_retrain(role: str = admin):
-    """Champion/challenger retraining on the analyst-labelled flows. Takes about 10-20 s.
-    A promoted challenger is saved to disk, so it survives a restart and can be rolled back."""
-    if CACHE is None:
-        raise HTTPException(503, "model/train_cache.npz is missing; run train.py")
-    if not _retrain_lock.acquire(blocking=False):
-        raise HTTPException(409, "A retrain is already running. Wait for it to finish.")
-    try:
-        report = retrain(DETECTOR, META | {"threshold": THRESHOLD}, CACHE, _read_labelled())
-        new = report.pop("detector", None)
-        if new is not None:
-            _activate(REGISTRY.save(new, report))
-        report["model_version"] = model_version()
-        LEARNING["last_report"] = report
-        audit(role, "retrain", promoted=report["promoted"], labelled=report["labelled"], model_version=report["model_version"])
-        return report
-    finally:
-        _retrain_lock.release()
+def _new_shadow(detector, report: dict) -> None:
+    SHADOW.update(detector=detector, since=int(time.time()), report=report,
+                  stats=dict.fromkeys(("flows", "agree", "only_shadow_flags", "only_live_flags",
+                                       "only_shadow_flags_true_attack", "only_shadow_flags_true_normal",
+                                       "only_live_flags_true_attack", "only_live_flags_true_normal"), 0))
 
 
-class Rollback(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
-    generation: int = Field(ge=0)
-
-
-@app.post("/learning/rollback")
-def learning_rollback(body: Rollback, role: str = admin):
-    """Make an earlier model live again. Generation 0 is the model the image shipped with."""
-    if body.generation and REGISTRY.load(body.generation) is None:
-        raise HTTPException(404, "That model version does not exist or failed its integrity check.")
-    REGISTRY.activate(body.generation)
-    _activate(body.generation)
-    audit(role, "rollback", generation=body.generation)
-    return {"active": body.generation, "model_version": model_version()}
-
-
-@app.get("/learning/status")
-def learning_status():
-    st = REGISTRY.state()
-    return {"active": LEARNING["generation"], "busy": _retrain_lock.locked(), "labelled": _labelled_counts(),
-            "model_version": model_version(),
-            "versions": [{k: v for k, v in ver.items() if k != "file"} for ver in st["versions"]]}
-
-
-@app.get("/audit/verify")
-def audit_verify():
+def verify_logs() -> dict:
     """Recompute both hash chains: the prediction log and the log of analyst/admin actions."""
     pred, acts = PRED_LOG.verify(), AUDIT_LOG.verify()
     LOG_ENTRIES.set(pred["entries"])
     return pred | {"valid": pred["valid"] and acts["valid"], "actions": acts}
 
 
-@app.get("/audit/actions")
-def audit_actions(limit: int = 50):
-    return {"items": AUDIT_LOG.read(max(1, min(limit, 500)))[::-1]}
-
-
-@app.get("/brief")
-def brief(last: int = 500):
+def make_brief(last: int = 500) -> dict:
     """Shift report built from the log: what was seen and what to do first."""
     entries = read_log(max(10, min(last, 3000)))
     if not entries:
@@ -826,7 +775,7 @@ def brief(last: int = 500):
         actions.append("Triage the review queue; label what you find with the feedback buttons.")
     if not points:
         points.append("All scored traffic matched normal behaviour.")
-    chain = audit_verify()
+    chain = verify_logs()
     points.append("Prediction log integrity: " + ("hash chain intact." if chain["valid"]
                                                   else f"CHAIN BROKEN at line {chain['broken_at_line']}."))
     if not chain["valid"]:
@@ -838,13 +787,14 @@ def brief(last: int = 500):
 
 
 # ---- real traffic ----
-def _capture_report(data: bytes, name: str, source: str) -> dict:
+def _capture_report(data: bytes, name: str, source: str, log: bool = True) -> dict:
     try:
-        items = pcap_flows.to_flows(pcap_flows.connections(pcap_flows.parse_pcap(data)))
+        conns = pcap_flows.parse_zeek(data) if pcap_flows.is_zeek(data) else pcap_flows.connections(pcap_flows.parse_pcap(data))
+        items = pcap_flows.to_flows(conns)[:20000]
+        flows = [Flow(**it["flow"]).model_dump() for it in items]
     except pcap_flows.PcapError as e:
         raise HTTPException(422, str(e)) from None
-    results = [analyse(Flow(**it["flow"]).model_dump(), with_explanation=False, source=source) for it in items[:3000]]
-    items = items[:len(results)]
+    results = analyse_many(flows, source, log=log)
     counts: dict = {}
     for r in results:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
@@ -853,108 +803,13 @@ def _capture_report(data: bytes, name: str, source: str) -> dict:
              "priority": r.get("asset_context", {}).get("priority"), "flow": it["flow"]}
             for it, r in zip(items, results, strict=True)]
     rows.sort(key=lambda r: -r["risk"])
-    return {"name": name, "flows": len(rows), "verdicts": counts, "graph": pcap_flows.host_graph(items, results),
-            "rows": rows[:200],
+    graph = pcap_flows.host_graph(items, results)
+    return {"name": name, "flows": len(rows), "verdicts": counts, "graph": graph, "rows": rows[:300], "logged": log,
+            "blocklist": blocklist(graph["sources"]), "timeline": pcap_flows.timeline(items, results, graph["sources"]),
             "span_seconds": round(max(i["start"] for i in items) - min(i["start"] for i in items), 1)}
 
 
-@app.post("/capture")
-async def capture(request: Request):
-    """Body: the raw bytes of a classic .pcap file (Content-Type: application/octet-stream), up to 5 MB."""
-    data = await request.body()
-    if len(data) > MAX_CAPTURE_BYTES:
-        raise HTTPException(413, "Capture is larger than 5 MB. Trim it first, e.g. editcap -c 20000 in.pcap out.pcap")
-    return _capture_report(data, "uploaded capture", "capture")
-
-
-@app.get("/capture/sample")
-def capture_sample():
-    return _capture_report((ROOT / "data" / "sample_capture.pcap").read_bytes(), "sample_capture.pcap (synthetic)",
-                           "capture-sample")
-
-
-# ---- assets: recon fused into alert priority ----
-class AssetIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=40, pattern=r"^[\w .-]+$")
-    url: str = Field(min_length=8, max_length=200)
-    services: list[Literal[tuple(SERVICES)]] = Field(min_length=1, max_length=8)
-
-
 _scans: dict[str, deque] = {}
-
-
-@app.post("/assets")
-def add_asset(body: AssetIn, request: Request, role: str = admin):
-    if os.getenv("RECON_ENABLED", "1") != "1":
-        raise HTTPException(503, "Asset scanning is switched off on this deployment (RECON_ENABLED=0).")
-    q = _scans.setdefault(client_ip(request), deque())
-    now = time.time()
-    while q and now - q[0] > 60:
-        q.popleft()
-    if len(q) >= 6:  # each scan makes an outbound request, so this limit is much tighter than scoring
-        raise HTTPException(429, "Scan limit reached: 6 per minute.")
-    q.append(now)
-    if len(ASSETS) >= 20 and body.name not in ASSETS:
-        raise HTTPException(409, "Asset list is full (20). Remove one first.")
-    try:
-        result = recon.scan(body.url)
-    except recon.ReconError as e:
-        raise HTTPException(422, str(e)) from None
-    ASSETS[body.name] = {"name": body.name, "services": body.services, **result}
-    audit(role, "add_asset", name=body.name, url=body.url, exposure=result["exposure"])
-    try:
-        ASSET_FILE.write_text(json.dumps(ASSETS))
-    except OSError:
-        pass
-    return ASSETS[body.name]
-
-
-@app.get("/assets")
-def list_assets():
-    return {"assets": list(ASSETS.values()), "enabled": os.getenv("RECON_ENABLED", "1") == "1"}
-
-
-@app.delete("/assets/{name}")
-def delete_asset(name: str, role: str = admin):
-    if ASSETS.pop(name, None) is None:
-        raise HTTPException(404, "No asset with that name.")
-    audit(role, "delete_asset", name=name)
-    try:
-        ASSET_FILE.write_text(json.dumps(ASSETS))
-    except OSError:
-        pass
-    return {"removed": name}
-
-
-# ---- copilot ----
-class Question(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    question: str = Field(min_length=3, max_length=300)
-
-
-@app.post("/copilot")
-def copilot(q: Question):
-    entries = read_log(500)
-    verdicts: dict = {}
-    fam: dict = {}
-    svc: dict = {}
-    for e in entries:
-        o = e["output"]
-        verdicts[o["verdict"]] = verdicts.get(o["verdict"], 0) + 1
-        if o["verdict"] == "attack":
-            fam[o["attack_family"]] = fam.get(o["attack_family"], 0) + 1
-            svc[e["input"]["service"]] = svc.get(e["input"]["service"], 0) + 1
-    b = brief()
-    context = {"flows": len(entries), "verdicts": verdicts,
-               "attack_families": sorted(fam.items(), key=lambda kv: -kv[1])[:4],
-               "top_services_attacked": sorted(svc.items(), key=lambda kv: -kv[1])[:4],
-               "actions": b["actions"], "log_chain_valid": audit_verify()["valid"],
-               "drift_status": drift_report(read_inputs(LOG_FILE, 2000), META["feature_stats"])["status"],
-               "campaigns": len(find_campaigns(current_suspects(), NORMAL_REF)) if NORMAL_REF is not None else 0,
-               "assets": [{"name": a["name"], "exposure": a["exposure"], "services": a["services"]} for a in ASSETS.values()],
-               "model_version": model_version()}
-    return copilot_answer(q.question, context)
 
 
 def _entry(request_id: str) -> dict | None:
@@ -964,25 +819,6 @@ def _entry(request_id: str) -> dict | None:
 def _label_from_verdict(entry: dict, correct: bool, true_label: str | None) -> str:
     said_attack = entry["output"]["verdict"] in ("attack", "zero_day_suspect")
     return true_label or ("attack" if said_attack == correct else "benign")
-
-
-@app.post("/feedback")
-def feedback(fb: Feedback, role: str = analyst):
-    """A verdict marked wrong becomes a labelled flow, so it reaches the next retrain."""
-    entry = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), **fb.model_dump()}
-    try:
-        with _log_lock, FEEDBACK_FILE.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError:
-        raise HTTPException(503, "Feedback log is not writable") from None
-    queued = False
-    logged = _entry(fb.request_id)
-    if logged and (not fb.correct or fb.true_label):
-        _add_labels([{"input": logged["input"], "label": _label_from_verdict(logged, fb.correct, fb.true_label),
-                      "source": "feedback", "request_id": fb.request_id}])
-        queued = True
-    audit(role, "feedback", request_id=fb.request_id, correct=fb.correct, queued=queued)
-    return {"stored": True, "queued_for_retraining": queued}
 
 
 # ---- alert queue ----
@@ -996,8 +832,7 @@ def _alert_states() -> dict:
         return {}
 
 
-@app.get("/alerts")
-def alerts(state: str = "open", limit: int = 200):
+def list_alerts(state: str = "open", limit: int = 200) -> dict:
     """Everything that is not benign, newest first, with its triage state. state=open means new + investigating."""
     states = _alert_states()
     items, counts = [], dict.fromkeys(ALERT_STATES, 0)
@@ -1010,56 +845,11 @@ def alerts(state: str = "open", limit: int = 200):
             asset = next((a for a in ASSETS.values() if e["input"]["service"] in a["services"]), None)
             items.append({"request_id": e["request_id"], "ts": e["ts"], "source": e.get("source", "api"),
                           "connection": f"{e['input']['protocol_type']}/{e['input']['service']} {e['input']['flag']}",
-                          **e["output"], **st, "input": e["input"],
+                          **e["output"], **st,
                           "priority": recon.priority(e["output"]["risk_score"], asset["exposure"]) if asset
                           else e["output"]["risk_score"]})
     items.sort(key=lambda a: -a["priority"])
     return {"counts": counts, "items": items[:max(1, min(limit, 500))]}
-
-
-class AlertUpdate(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
-    state: Literal[ALERT_STATES]
-    assignee: str = Field(default="", max_length=40, pattern=r"^[\w .@-]*$")
-
-
-@app.patch("/alerts/{request_id}")
-def update_alert(request_id: str, body: AlertUpdate, role: str = analyst):
-    """Closing an alert is also a label: confirmed -> attack, false_positive -> benign."""
-    logged = _entry(request_id)
-    if not logged:
-        raise HTTPException(404, "No logged prediction with that request id.")
-    states = _alert_states()
-    states[request_id] = {"state": body.state, "assignee": body.assignee}
-    with _log_lock:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        ALERT_FILE.write_text(json.dumps(states))
-    if body.state in ("confirmed", "false_positive"):
-        _add_labels([{"input": logged["input"], "label": "attack" if body.state == "confirmed" else "benign",
-                      "source": "triage", "request_id": request_id}])
-    audit(role, "triage", request_id=request_id, state=body.state, assignee=body.assignee)
-    return states[request_id] | {"request_id": request_id}
-
-
-# ---- settings: decision threshold ----
-class ThresholdIn(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
-    threshold: float = Field(ge=0.05, le=0.95)
-
-
-@app.post("/settings/threshold")
-def set_threshold(body: ThresholdIn, role: str = admin):
-    """Move the attack-probability cut-off. Lower catches more and raises more false alarms."""
-    global THRESHOLD
-    if body.threshold <= QHAT:
-        raise HTTPException(422, f"Threshold must stay above the review band ({QHAT:.2f}).")
-    old, THRESHOLD = THRESHOLD, round(body.threshold, 2)
-    try:
-        SETTINGS_FILE.write_text(json.dumps({"threshold": THRESHOLD}))
-    except OSError:
-        pass
-    audit(role, "set_threshold", old=old, new=THRESHOLD)
-    return {"threshold": THRESHOLD}
 
 
 # ---- drift / integrity alarm ----
@@ -1067,7 +857,7 @@ def check_alarm(force: bool = False) -> dict:
     """Runs on a timer. Sends one webhook message when drift appears or the log chain breaks
     (on the change, not on every check, so a channel is not flooded)."""
     drift = drift_report(read_inputs(LOG_FILE, 2000), META["feature_stats"])["status"]
-    chain = audit_verify()["valid"]
+    chain = verify_logs()["valid"]
     DRIFT_STATE.set({"warn": 1, "drift": 2}.get(drift, 0))
     worse = (drift == "drift" and ALARM["drift"] != "drift") or (not chain and ALARM["chain_valid"])
     ALARM.update(last_check=int(time.time()), drift=drift, chain_valid=chain)
@@ -1083,51 +873,57 @@ def check_alarm(force: bool = False) -> dict:
     return ALARM | {"sent": sent, "webhook": bool(url)}
 
 
-@app.get("/monitoring/alarm")
-def alarm_state():
-    return ALARM | {"webhook": bool(os.getenv("ALERT_WEBHOOK_URL")), "interval_seconds": ALARM_INTERVAL}
+AUTO_RETRAIN = os.getenv("AUTO_RETRAIN", "0") == "1"
+AUTO_RETRAIN_MIN_LABELS = int(os.getenv("AUTO_RETRAIN_MIN_LABELS", "50"))
+_auto = {"labels_at_last_run": 0}
 
 
-@app.post("/monitoring/alarm/test")
-def alarm_test(role: str = admin):
-    audit(role, "alarm_test")
-    return check_alarm(force=True)
-
-
-# ---- overview ----
-@app.get("/auth/whoami")
-def whoami(request: Request):
-    return {"role": role_of(request), "open_mode": not ADMIN_TOKEN and not ANALYST_TOKEN}
-
-
-@app.get("/overview")
-def overview():
-    entries = read_log()
-    verdicts: dict = {}
-    sources: dict = {}
-    for e in entries:
-        verdicts[e["output"]["verdict"]] = verdicts.get(e["output"]["verdict"], 0) + 1
-        sources[e.get("source", "api")] = sources.get(e.get("source", "api"), 0) + 1
-    queue = alerts("open", 500)
-    distinct: dict = {}
-    for a in queue["items"]:  # a flood is one finding, not 200 identical rows
-        distinct.setdefault((a["connection"], a["verdict"]), a)
-    queue["items"] = list(distinct.values())[:6]
-    chain = audit_verify()
-    return {"flows": len(entries), "verdicts": verdicts, "sources": sources,
-            "open_alerts": queue["counts"]["new"] + queue["counts"]["investigating"], "alert_counts": queue["counts"],
-            "top_alerts": [{k: a[k] for k in ("request_id", "connection", "verdict", "risk_score", "priority", "state", "input")}
-                           for a in queue["items"]],
-            "campaigns": len(find_campaigns(current_suspects(), NORMAL_REF)) if NORMAL_REF is not None else 0,
-            "labelled": _labelled_counts(),
-            "drift": drift_report(read_inputs(LOG_FILE, 2000), META["feature_stats"])["status"],
-            "chain": {"valid": chain["valid"], "entries": chain["entries"]},
-            "model": {"version": model_version(), "generation": LEARNING["generation"], "threshold": THRESHOLD},
-            "assets": sorted(({"name": a["name"], "exposure": a["exposure"], "grade": a["grade"]} for a in ASSETS.values()),
-                             key=lambda a: -a["exposure"])[:4],
-            "open_mode": not ADMIN_TOKEN and not ANALYST_TOKEN}
+def auto_retrain() -> dict | None:
+    """Continuous training, run by the timer. Starts a retrain when enough new labels have
+    arrived, or when drift is detected and there are labels to learn from. The challenger
+    always goes to SHADOW: an unattended job must never replace the live model by itself."""
+    if not AUTO_RETRAIN or CACHE is None or SHADOW["detector"] is not None:
+        return None
+    n = sum(_labelled_counts().values())
+    fresh = n - _auto["labels_at_last_run"]
+    if not (fresh >= AUTO_RETRAIN_MIN_LABELS or (ALARM["drift"] == "drift" and fresh >= 10)):
+        return None
+    if not _retrain_lock.acquire(blocking=False):
+        return None
+    try:
+        report = retrain(DETECTOR, META | {"threshold": THRESHOLD}, CACHE, _read_labelled())
+        new = report.pop("detector", None)
+        _auto["labels_at_last_run"] = n
+        if new is not None:
+            report |= {"promoted": False, "mode": "shadow", "reason": "Scheduled retrain: challenger is running in shadow."}
+            _new_shadow(new, dict(report))
+        LEARNING["last_report"] = report | {"model_version": model_version()}
+        audit("system/scheduler", "auto_retrain", labelled=n, shadow=new is not None)
+        return report
+    finally:
+        _retrain_lock.release()
 
 
 @app.get("/metrics", include_in_schema=False)
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/audit/verify")
+def audit_verify():
+    return verify_logs()
+
+
+@app.get("/brief")
+def brief(last: int = 500):
+    return make_brief(last)
+
+
+# The remaining routes live in three modules. They are imported last because each one does
+# `import app as core` and needs everything above to exist already.
+import routes_hunt  # noqa: E402
+import routes_ops  # noqa: E402
+import routes_traffic  # noqa: E402
+
+for _module in (routes_hunt, routes_ops, routes_traffic):
+    app.include_router(_module.router)

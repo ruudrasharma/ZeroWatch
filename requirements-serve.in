@@ -1,0 +1,9 @@
+# The seven packages the serving image needs. Edit THIS file, then regenerate the locked file:
+#   uv pip compile requirements-serve.in --generate-hashes --python-version 3.11 -o requirements-serve.txt
+fastapi==0.163.0
+uvicorn==0.54.0
+pydantic==2.14.3
+scikit-learn==1.9.1
+numpy==2.4.6
+joblib==1.6.0
+prometheus-client==0.26.0
