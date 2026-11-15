@@ -5,6 +5,8 @@
 !features.py
 !drift_check.py
 !learning.py
+!ops.py
+!store.py
 !pcap_flows.py
 !recon.py
 !copilot.py

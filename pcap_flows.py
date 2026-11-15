@@ -1,7 +1,7 @@
 """
 ZeroWatch - real traffic: turn a packet capture into the flows the model scores.
 
-Reads classic .pcap files with the standard library only (no scapy in the serving image),
+Reads .pcap and .pcapng files (IPv4 and IPv6) with the standard library only (no scapy in the serving image),
 rebuilds connections, and derives the same 20 features as the data contract:
 
   per connection    duration, protocol, service (from the destination port), TCP state flag,
@@ -37,65 +37,104 @@ class PcapError(ValueError):
     pass
 
 
-def parse_pcap(data: bytes) -> list[dict]:
-    """Classic pcap -> list of IPv4 packets {ts, src, dst, proto, sport, dport, flags, size}."""
-    if len(data) < 24:
-        raise PcapError("File is too small to be a packet capture.")
+def _frames(data: bytes):
+    """Yield (timestamp, linktype, frame bytes) from a classic pcap or a pcapng file."""
     magic = data[:4]
+    if magic == b"\x0a\x0d\x0d\x0a":  # pcapng: a sequence of typed blocks
+        end, off, links = "<", 0, []
+        while off + 12 <= len(data):
+            btype, blen = struct.unpack(end + "II", data[off:off + 8])
+            if btype == 0x0A0D0D0A:  # section header: carries the byte-order mark
+                end = "<" if data[off + 8:off + 12] == b"\x4d\x3c\x2b\x1a" else ">"
+                blen = struct.unpack(end + "I", data[off + 4:off + 8])[0]
+            if blen < 12 or off + blen > len(data):
+                break
+            body = data[off + 8:off + blen - 4]
+            if btype == 1:  # interface description: link type + timestamp resolution option
+                res, o = 1e6, 8
+                while o + 4 <= len(body):
+                    code, ln = struct.unpack(end + "HH", body[o:o + 4])
+                    if code == 9 and ln == 1:
+                        v = body[o + 4]
+                        res = float(2 ** (v & 0x7F)) if v & 0x80 else float(10 ** v)
+                    if code == 0:
+                        break
+                    o += 4 + ln + (-ln % 4)
+                links.append((struct.unpack(end + "H", body[:2])[0], res))
+            elif btype == 6 and len(body) >= 20:  # enhanced packet block
+                iface, hi, lo, cap, _ = struct.unpack(end + "IIIII", body[:20])
+                link, res = links[iface] if iface < len(links) else (1, 1e6)
+                yield ((hi << 32) | lo) / res, link, body[20:20 + cap]
+            off += blen
+        return
     if magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
         end = "<"
     elif magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
         end = ">"
-    elif magic == b"\x0a\x0d\x0d\x0a":
-        raise PcapError("This is a pcapng file. Convert it first: tshark -F pcap -r in.pcapng -w out.pcap")
     else:
-        raise PcapError("Not a pcap file (unknown magic number).")
+        raise PcapError("Not a pcap or pcapng file (unknown magic number).")
     nano = magic in (b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d")
     linktype = struct.unpack(end + "I", data[20:24])[0]
-    skip = {1: 14, 101: 0, 113: 16, 0: 4}.get(linktype)
-    if skip is None:
-        raise PcapError(f"Unsupported link type {linktype}; Ethernet, raw IP and Linux cooked captures are supported.")
-    out, off = [], 24
-    while off + 16 <= len(data) and len(out) < MAX_PACKETS:
+    off = 24
+    while off + 16 <= len(data):
         sec, frac, caplen, _orig = struct.unpack(end + "IIII", data[off:off + 16])
-        frame = data[off + 16: off + 16 + caplen]
+        yield sec + frac / (1e9 if nano else 1e6), linktype, data[off + 16: off + 16 + caplen]
         off += 16 + caplen
+
+
+def parse_pcap(data: bytes) -> list[dict]:
+    """pcap / pcapng -> list of IPv4 and IPv6 packets {ts, src, dst, proto, sport, dport, flags, size}."""
+    if len(data) < 24:
+        raise PcapError("File is too small to be a packet capture.")
+    out = []
+    for ts, linktype, frame in _frames(data):
+        if len(out) >= MAX_PACKETS:
+            break
+        skip = {1: 14, 101: 0, 113: 16, 0: 4}.get(linktype)
+        if skip is None:
+            raise PcapError(f"Unsupported link type {linktype}; Ethernet, raw IP and Linux cooked captures are supported.")
         if linktype == 1:
             if len(frame) < 14:
                 continue
-            etype = struct.unpack("!H", frame[12:14])[0]
-            hdr = 14
+            etype, hdr = struct.unpack("!H", frame[12:14])[0], 14
             if etype == 0x8100 and len(frame) >= 18:  # VLAN tag
                 etype, hdr = struct.unpack("!H", frame[16:18])[0], 18
-            if etype != 0x0800:
+            if etype not in (0x0800, 0x86DD):
                 continue
             ip = frame[hdr:]
         else:
             ip = frame[skip:]
-        if len(ip) < 20 or ip[0] >> 4 != 4:
+        if len(ip) < 20:
             continue
-        ihl, total, proto = (ip[0] & 0x0F) * 4, struct.unpack("!H", ip[2:4])[0], ip[9]
-        pkt = {"ts": sec + frac / (1e9 if nano else 1e6), "src": socket.inet_ntoa(ip[12:16]),
-               "dst": socket.inet_ntoa(ip[16:20]), "sport": 0, "dport": 0, "flags": 0, "size": 0}
-        seg = ip[ihl:]
+        version = ip[0] >> 4
+        if version == 4:
+            ihl, total, proto = (ip[0] & 0x0F) * 4, struct.unpack("!H", ip[2:4])[0], ip[9]
+            src, dst, seg, payload = socket.inet_ntoa(ip[12:16]), socket.inet_ntoa(ip[16:20]), ip[ihl:], total - ihl
+        elif version == 6 and len(ip) >= 40:
+            payload, proto = struct.unpack("!H", ip[4:6])[0], ip[6]
+            src, dst = socket.inet_ntop(socket.AF_INET6, ip[8:24]), socket.inet_ntop(socket.AF_INET6, ip[24:40])
+            seg = ip[40:]
+        else:
+            continue
+        pkt = {"ts": ts, "src": src, "dst": dst, "sport": 0, "dport": 0, "flags": 0, "size": 0}
         if proto == 6 and len(seg) >= 20:
             pkt["proto"] = "tcp"
             pkt["sport"], pkt["dport"] = struct.unpack("!HH", seg[:4])
             pkt["flags"] = seg[13]
-            pkt["size"] = max(0, total - ihl - (seg[12] >> 4) * 4)
+            pkt["size"] = max(0, payload - (seg[12] >> 4) * 4)
         elif proto == 17 and len(seg) >= 8:
             pkt["proto"] = "udp"
             pkt["sport"], pkt["dport"] = struct.unpack("!HH", seg[:4])
-            pkt["size"] = max(0, total - ihl - 8)
-        elif proto == 1 and len(seg) >= 4:
+            pkt["size"] = max(0, payload - 8)
+        elif proto in (1, 58) and len(seg) >= 4:  # ICMP / ICMPv6 (echo request 128, reply 129)
             pkt["proto"] = "icmp"
-            pkt["dport"] = seg[0]  # ICMP type
-            pkt["size"] = max(0, total - ihl - 8)
+            pkt["dport"] = {128: 8, 129: 0}.get(seg[0], seg[0]) if proto == 58 else seg[0]
+            pkt["size"] = max(0, payload - 8)
         else:
             continue
         out.append(pkt)
     if not out:
-        raise PcapError("The capture contains no IPv4 TCP, UDP or ICMP packets.")
+        raise PcapError("The capture contains no TCP, UDP or ICMP packets over IPv4 or IPv6.")
     return out
 
 

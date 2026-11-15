@@ -11,14 +11,60 @@ const GROUPS = [
   ["Same source, last two seconds", ["count", "srv_count", "serror_rate", "rerror_rate", "same_srv_rate", "diff_srv_rate"]],
   ["Destination host history", ["dst_host_count", "dst_host_srv_count", "dst_host_serror_rate"]],
 ];
-let contract = null, lastFlow = null, lastResult = null;
+let contract = null, lastFlow = null, lastResult = null, liveTimer = null;
 
-async function api(path, body) {
-  const res = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+function apiKey() { try { return sessionStorage.getItem("zw-key") || ""; } catch (e) { return ""; } }
+async function api(path, body, method) {
+  const headers = {}, key = apiKey();
+  if (key) headers["x-api-key"] = key;
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const res = await fetch(path, { method: method || (body === undefined ? "GET" : "POST"), headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error("HTTP " + res.status), { status: res.status, data });
+  if (!res.ok) {
+    if (res.status === 401) toast("That action needs an API key. Use Sign in at the top.", true);
+    if (res.status === 403) toast("That action needs the admin key.", true);
+    if (res.status === 429) toast("Too many requests. Wait a minute and try again.", true);
+    throw Object.assign(new Error("HTTP " + res.status), { status: res.status, data });
+  }
   return data;
 }
+function toast(text, bad) {
+  const t = document.createElement("div");
+  t.className = "toast" + (bad ? " bad" : ""); t.textContent = text;
+  $("#toasts").appendChild(t);
+  setTimeout(() => t.remove(), 4200);
+}
+const skeleton = (sel) => { $(sel).innerHTML = '<div class="skeleton"></div><div class="skeleton tall"></div>'; };
+function download(name, text, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: type || "text/plain" })); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+// Sortable, filterable, paged table. columns: [{key, label, num, render(row)}]
+function dataTable(sel, columns, rows, opts = {}) {
+  const el = $(sel), size = opts.pageSize || 15, st = { q: "", sort: null, dir: 1, page: 0 };
+  function draw() {
+    let view = rows.filter((r) => !st.q || columns.some((c) => String(r[c.key] ?? "").toLowerCase().includes(st.q)));
+    if (st.sort) view = [...view].sort((a, b) => (a[st.sort] > b[st.sort] ? 1 : a[st.sort] < b[st.sort] ? -1 : 0) * st.dir);
+    const pages = Math.max(1, Math.ceil(view.length / size)); st.page = Math.min(st.page, pages - 1);
+    const shown = view.slice(st.page * size, st.page * size + size);
+    el.innerHTML = `<div class="tools"><input type="search" placeholder="Filter ${rows.length} rows" aria-label="Filter rows" value="${esc(st.q)}">
+        <div class="pager"><span>${view.length ? st.page * size + 1 : 0} to ${st.page * size + shown.length} of ${view.length}</span><button class="btn" data-pg="-1" ${st.page ? "" : "disabled"}>Previous</button><button class="btn" data-pg="1" ${st.page < pages - 1 ? "" : "disabled"}>Next</button></div></div>
+      <div class="table-wrap"><table><thead><tr>${columns.map((c) => `<th class="sortable ${c.num ? "num" : ""}" data-k="${c.key}" ${st.sort === c.key ? `aria-sort="${st.dir > 0 ? "ascending" : "descending"}"` : ""}>${c.label}</th>`).join("")}</tr></thead>
+      <tbody>${shown.map((r) => `<tr class="${opts.onRow ? "click" : ""}" data-i="${rows.indexOf(r)}" ${opts.onRow ? 'tabindex="0"' : ""}>${columns.map((c) => `<td class="${c.num ? "num" : c.mono ? "mono" : ""}">${c.render ? c.render(r) : esc(r[c.key] ?? "")}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${columns.length}" class="empty">No rows match that filter.</td></tr>`}</tbody></table></div>`;
+    const input = $("input[type=search]", el);
+    input.oninput = () => { st.q = input.value.toLowerCase(); st.page = 0; draw(); const n = $("input[type=search]", el); n.focus(); n.setSelectionRange(n.value.length, n.value.length); };
+    el.querySelectorAll("[data-pg]").forEach((b) => (b.onclick = () => { st.page += Number(b.dataset.pg); draw(); }));
+    el.querySelectorAll("th[data-k]").forEach((th) => (th.onclick = () => { st.dir = st.sort === th.dataset.k ? -st.dir : 1; st.sort = th.dataset.k; draw(); }));
+    if (opts.onRow) el.querySelectorAll("tbody tr[data-i]").forEach((tr) => {
+      tr.onclick = (e) => { if (!e.target.closest("select,button,a")) opts.onRow(rows[tr.dataset.i]); };
+      tr.onkeydown = (e) => { if (e.key === "Enter") opts.onRow(rows[tr.dataset.i]); };
+    });
+    if (opts.after) opts.after(el);
+  }
+  draw();
+}
+function openFlow(flow) { show("analyze"); fill(flow); $("#flow-form").requestSubmit(); }
 
 // ---------- theme ----------
 function setTheme(t) {
@@ -30,13 +76,39 @@ $("#theme").onclick = () => setTheme(document.documentElement.dataset.theme === 
 setTheme(document.documentElement.dataset.theme);
 
 // ---------- tabs ----------
-const loaders = { model: loadModel, monitor: loadMonitor, hunt: loadHunt, assets: loadAssets };
+const loaders = { model: loadModel, monitor: loadMonitor, hunt: loadHunt, assets: loadAssets, overview: loadOverview, queue: loadQueue };
 document.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => show(b.dataset.view)));
-function show(view) {
+// Each view has its own #hash, so the back button and shared links work.
+function show(view, fromHash) {
+  if (!document.getElementById("view-" + view)) view = "analyze";
   document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.view === view));
   document.querySelectorAll("main > section").forEach((s) => (s.hidden = s.id !== "view-" + view));
-  if (loaders[view]) loaders[view]();
+  if (!fromHash && location.hash !== "#" + view) history.pushState(null, "", "#" + view);
+  document.title = $("#tab-" + view).textContent + " | ZeroWatch";
+  if (view !== "live" && liveTimer) $("#live-toggle").click();  // do not keep replaying in the background
+  if (loaders[view] && contract) loaders[view]();
+  if (fromHash !== "boot") $("#view-" + view).focus({ preventScroll: true });
+  $("#tab-" + view).scrollIntoView({ block: "nearest", inline: "nearest" });
 }
+window.addEventListener("popstate", () => show(location.hash.slice(1) || "analyze", true));
+
+// ---------- sign in ----------
+async function refreshAuth() {
+  const w = await api("/auth/whoami").catch(() => null);
+  if (!w) return;
+  $("#auth-btn").textContent = w.open_mode ? "Open mode" : w.role === "viewer" ? "Sign in" : "Signed in: " + w.role;
+  $("#auth-note").textContent = w.open_mode ? "No keys are configured on this service, so every action is allowed. Set ANALYST_TOKEN and ADMIN_TOKEN before exposing it."
+    : w.role === "viewer" ? "Scoring works without a key. Labelling and triage need the analyst key; retraining, rollback, assets and settings need the admin key."
+    : `You are signed in as ${w.role}. The key is kept for this browser tab only.`;
+}
+$("#auth-btn").onclick = () => { const p = $("#auth-pop"); p.hidden = !p.hidden; $("#auth-btn").setAttribute("aria-expanded", !p.hidden); if (!p.hidden) $("#auth-key").focus(); };
+$("#auth-pop").onsubmit = async (e) => {
+  e.preventDefault();
+  try { sessionStorage.setItem("zw-key", $("#auth-key").value.trim()); } catch (err) { /* private mode */ }
+  $("#auth-key").value = ""; await refreshAuth();
+  toast($("#auth-btn").textContent.startsWith("Signed in") ? $("#auth-btn").textContent : "That key was not recognised.", !$("#auth-btn").textContent.startsWith("Signed in"));
+};
+$("#auth-clear").onclick = async () => { try { sessionStorage.removeItem("zw-key"); } catch (err) { /* private mode */ } await refreshAuth(); toast("Signed out."); };
 
 // ---------- trace ----------
 function trace(result) {
@@ -171,13 +243,12 @@ function renderResult(r) {
       <p class="note">Only ${c.attacker_controlled.join(", ")} are searched. Flags, login state and destination-host history are observed by the defender.</p>`;
   };
   document.querySelectorAll("[data-fb]").forEach((b) => (b.onclick = async () => {
-    await api("/feedback", { request_id: r.request_id, correct: b.dataset.fb === "1" }).catch(() => null);
-    $("#fb-note").textContent = "Saved for the next retraining review.";
+    const f = await api("/feedback", { request_id: r.request_id, correct: b.dataset.fb === "1" }).catch(() => null);
+    if (f) toast(f.queued_for_retraining ? "Saved. This flow is now labelled for the next retrain." : "Saved. Thanks for confirming.");
   }));
 }
 
 // ---------- live ----------
-let liveTimer = null;
 const live = { flows: 0, flagged: 0, zero: 0, missed: 0, false_alarm: 0, unseen: 0, review: 0 };
 function liveStats() {
   const s = [[live.flows, "flows replayed"], [live.flagged, "flagged"], [`${live.zero} of ${live.unseen}`, "unseen attack types flagged"], [live.review, "sent to review"], [live.missed, "attacks missed"], [live.false_alarm, "false alarms"]];
@@ -204,7 +275,7 @@ async function liveTick() {
     tr.className = "click"; tr.tabIndex = 0;
     tr.innerHTML = `<td class="mono">${flow.protocol_type}/${esc(flow.service)} ${flow.flag}</td><td>${esc(truth.label)} <span class="muted">${truth.family}</span></td>
       <td>${isAttack ? (truth.seen_in_training ? "yes" : "<b>no, new type</b>") : ""}</td><td><span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span></td><td class="num">${r.risk_score}</td><td>${outcome}</td>`;
-    tr.onclick = () => { show("analyze"); fill(flow); $("#flow-form").requestSubmit(); };
+    tr.onclick = () => openFlow(flow);
     tr.onkeydown = (e) => { if (e.key === "Enter") tr.onclick(); };
     body.prepend(tr); trace(r);
   }
@@ -241,10 +312,13 @@ function renderCapture(d) {
         <p class="note" style="margin-bottom:8px">${bad.length ? `${bad.length} source(s) behave like a scanner or flooder across their flows.` : "No source behaves like a scanner or flooder."}</p>
         <table><thead><tr><th>Source</th><th>Behaviour</th><th class="num">Flows</th><th class="num">Ports</th><th class="num">Failed</th><th class="num">Risk</th></tr></thead><tbody>
         ${d.graph.sources.slice(0, 10).map((s) => `<tr><td class="mono">${esc(s.ip)}</td><td>${s.behaviour === "normal" ? "normal" : `<span class="tag attack">${s.behaviour}</span>`}</td><td class="num">${s.flows}</td><td class="num">${s.distinct_ports}</td><td class="num">${pct(s.failed_share)}</td><td class="num">${s.source_risk}</td></tr>`).join("")}</tbody></table></div></div>
-    <div class="panel table-wrap" style="margin-top:16px"><h3 style="margin-bottom:10px">Riskiest connections</h3><table><thead><tr><th>Source</th><th>Destination</th><th>Service</th><th>State</th><th>Verdict</th><th class="num">Risk</th>${d.rows.some((r) => r.priority != null) ? '<th class="num">Priority</th>' : ""}</tr></thead><tbody>
-      ${d.rows.slice(0, 15).map((r, i) => `<tr class="click" data-row="${i}"><td class="mono">${esc(r.src)}</td><td class="mono">${esc(r.dst)}:${r.dport}</td><td class="mono">${esc(r.service)}</td><td class="mono">${r.flag}</td><td><span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span></td><td class="num">${r.risk}</td>${d.rows.some((x) => x.priority != null) ? `<td class="num">${r.priority ?? ""}</td>` : ""}</tr>`).join("")}</tbody></table>
+    <div class="panel" style="margin-top:16px"><h3 style="margin-bottom:10px">Connections</h3><div id="cap-table"></div>
       <p class="note">Select a row to open that connection in Analyze. Session-content features (failed logins, root shell) cannot be read from packets and are set to 0.</p></div>`;
-  document.querySelectorAll("#cap-out [data-row]").forEach((tr) => (tr.onclick = () => { show("analyze"); fill(d.rows[tr.dataset.row].flow); $("#flow-form").requestSubmit(); }));
+  const rows = d.rows.map((r) => ({ ...r, dest: `${r.dst}:${r.dport}`, verdict_label: VERDICT[r.verdict] }));
+  dataTable("#cap-table", [{ key: "src", label: "Source", mono: 1 }, { key: "dest", label: "Destination", mono: 1 }, { key: "service", label: "Service", mono: 1 }, { key: "flag", label: "State", mono: 1 },
+    { key: "verdict_label", label: "Verdict", render: (r) => `<span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span>` }, { key: "risk", label: "Risk", num: 1 },
+    ...(rows.some((r) => r.priority != null) ? [{ key: "priority", label: "Priority", num: 1 }] : [])], rows, { onRow: (r) => openFlow(r.flow) });
+  [...d.rows].reverse().slice(-60).forEach((r) => trace({ verdict: r.verdict, risk_score: r.risk }));
 }
 async function runCapture(promise) {
   $("#cap-out").innerHTML = `<div class="panel"><div class="empty"><b>Rebuilding connections...</b></div></div>`;
@@ -254,7 +328,7 @@ async function runCapture(promise) {
 $("#cap-sample").onclick = () => runCapture(api("/capture/sample"));
 $("#cap-file").onchange = async (e) => {
   const f = e.target.files[0]; if (!f) return;
-  runCapture(fetch("/capture", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: f }).then(async (res) => {
+  runCapture(fetch("/capture", { method: "POST", headers: { "content-type": "application/octet-stream", ...(apiKey() ? { "x-api-key": apiKey() } : {}) }, body: f }).then(async (res) => {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw Object.assign(new Error("HTTP " + res.status), { status: res.status, data });
     return data;
@@ -263,6 +337,7 @@ $("#cap-file").onchange = async (e) => {
 
 // ---------- assets ----------
 async function loadAssets() {
+  if (!$("#asset-out").children.length) skeleton("#asset-out");
   const d = await api("/assets");
   $("#asset-out").innerHTML = d.assets.length ? d.assets.map((a) => `<div class="panel"><div class="campaign"><div>
       <h3>${esc(a.name)} <span class="tag ${a.exposure >= 60 ? "attack" : a.exposure >= 35 ? "zero_day_suspect" : "benign"}">exposure ${a.exposure}/100, grade ${a.grade}</span></h3>
@@ -270,21 +345,23 @@ async function loadAssets() {
       ${a.findings.length ? `<ul class="brief">${a.findings.map((f) => `<li><b>${f.severity}</b> ${esc(f.text)}</li>`).join("")}</ul>` : `<p style="margin-top:8px">No exposure findings from the passive check.</p>`}
       </div><div class="side"><button class="btn" data-del="${esc(a.name)}">Remove</button></div></div></div>`).join("")
     : `<div class="panel"><div class="empty"><b>No assets registered</b>${d.enabled ? "Add the first one above. Alerts on its services will then show a priority." : "Asset scanning is switched off on this deployment."}</div></div>`;
-  document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await fetch("/assets/" + encodeURIComponent(b.dataset.del), { method: "DELETE" }); loadAssets(); }));
+  document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { const ok = await api("/assets/" + encodeURIComponent(b.dataset.del), undefined, "DELETE").catch(() => null); if (ok) toast("Asset removed."); loadAssets(); }));
 }
 $("#asset-form").onsubmit = async (e) => {
   e.preventDefault();
   const btn = $("#a-submit"); btn.disabled = true; $("#asset-error").innerHTML = "";
   try {
-    await api("/assets", { name: $("#a-name").value.trim(), url: $("#a-url").value.trim(), services: $("#a-services").value.split(",").map((s) => s.trim()).filter(Boolean) });
+    const a = await api("/assets", { name: $("#a-name").value.trim(), url: $("#a-url").value.trim(), services: $("#a-services").value.split(",").map((s) => s.trim()).filter(Boolean) });
+    toast(`${a.name} registered: exposure ${a.exposure}/100.`);
     loadAssets();
-  } catch (err) { showValidation(err, "#asset-error"); }
+  } catch (err) { if (err.status && ![401, 403, 429].includes(err.status)) showValidation(err, "#asset-error"); }
   btn.disabled = false;
 };
 
 // ---------- hunt ----------
 let lastRetrain = null;
 async function loadHunt() {
+  if (!$("#hunt-out").children.length) skeleton("#hunt-out");
   const d = await api("/campaigns").catch((e) => ({ error: e }));
   if (d.error) { $("#hunt-out").innerHTML = `<div class="error-box"><b>Campaigns are unavailable.</b> ${esc(d.error.data.detail || d.error.message)}</div>`; return; }
   const labelled = d.labelled.attack + d.labelled.benign;
@@ -296,7 +373,14 @@ async function loadHunt() {
         <tr><td>Champion (previous model)</td><td class="num">${pct(lastRetrain.champion.labelled_holdout_accuracy)}</td><td class="num">${lastRetrain.champion.validation_f1.toFixed(4)}</td></tr>
         <tr class="best"><td>Challenger</td><td class="num">${pct(lastRetrain.challenger.labelled_holdout_accuracy)}</td><td class="num">${lastRetrain.challenger.validation_f1.toFixed(4)}</td></tr></tbody></table>
         <p class="note">${lastRetrain.holdout_flows} labelled flows were held back from training to measure this. ${lastRetrain.quarantined_labels ? lastRetrain.quarantined_labels + " suspicious label(s) were quarantined." : ""} Live model: ${esc(lastRetrain.model_version)}</p>` : ""}</div>` : "";
-  const retrainBar = `<div class="panel"><div class="form-foot" style="margin-top:0"><button class="btn primary" id="retrain" ${labelled < 10 ? "disabled" : ""}>Retrain with ${labelled} labelled flows</button>
+  const st = await api("/learning/status").catch(() => ({ versions: [], active: 0 }));
+  const done = d.labelled_campaigns.length ? `<div class="panel table-wrap"><h3 style="margin-bottom:10px">Labelled campaigns</h3><table><thead><tr><th>Rule</th><th>Label</th><th class="num">Flows</th><th></th></tr></thead><tbody>
+      ${d.labelled_campaigns.map((c) => `<tr><td class="mono">${esc(c.rule || c.id)}</td><td>${c.label}</td><td class="num">${c.flows}</td><td><button class="btn" data-undo="${c.id}">Undo label</button></td></tr>`).join("")}</tbody></table></div>` : "";
+  const versions = st.versions.length ? `<div class="panel table-wrap"><h3 style="margin-bottom:10px">Model versions</h3><table><thead><tr><th>Version</th><th>Promoted</th><th class="num">Labelled flows</th><th class="num">Held-back correct</th><th class="num">Validation F1</th><th></th></tr></thead><tbody>
+      <tr class="${st.active === 0 ? "best" : ""}"><td>Shipped model${st.active === 0 ? " (live)" : ""}</td><td>at build time</td><td class="num"></td><td class="num"></td><td class="num"></td><td>${st.active === 0 ? "" : '<button class="btn" data-roll="0">Roll back to this</button>'}</td></tr>
+      ${st.versions.map((v) => `<tr class="${st.active === v.generation ? "best" : ""}"><td>Learned ${v.generation}${st.active === v.generation ? " (live)" : ""}</td><td class="mono">${new Date(v.promoted_at * 1000).toISOString().slice(0, 16).replace("T", " ")}</td><td class="num">${v.report.labelled}</td><td class="num">${pct(v.report.challenger.labelled_holdout_accuracy)}</td><td class="num">${v.report.challenger.validation_f1.toFixed(4)}</td><td>${st.active === v.generation ? "" : `<button class="btn" data-roll="${v.generation}">Make live</button>`}</td></tr>`).join("")}</tbody></table>
+      <p class="note">Promoted models are saved to disk with their hash, so they survive a restart.</p></div>` : "";
+  const retrainBar = `<div class="panel"><div class="form-foot" style="margin-top:0"><span id="retrain-slot"><button class="btn primary" id="retrain" ${labelled < 10 ? "disabled" : ""}>Retrain with ${labelled} labelled flows</button></span>
       <span class="muted">${labelled < 10 ? "Label at least 10 flows to enable retraining." : "Trains a challenger with the same settings as the live model. Takes 10 to 20 seconds."}</span></div></div>`;
   const cards = d.campaigns.map((c, i) => {
     const truth = Object.entries(c.true_labels), mixed = truth.some(([k]) => k === "normal");
@@ -305,34 +389,131 @@ async function loadHunt() {
       <div class="rule">${esc(c.signature.rule)}</div>
       <p style="font-size:.88rem">This generated rule matches ${pct(c.signature.coverage)} of the campaign and ${pct(c.signature.false_match_rate)} of normal training traffic. Mean risk ${c.mean_risk}.</p>
       ${truth.length ? `<p class="note ${mixed ? "warn" : ""}">True labels, known only because this is a labelled replay: ${truth.map(([k, v]) => `${esc(k)} ${v}`).join(", ")}.${mixed ? " This group contains normal traffic, so check it before labelling it all as an attack." : ""}</p>` : ""}
+      <div class="chips" style="margin-top:10px"><a class="chip" href="/campaigns/${c.id}/rule" download>Download Sigma rule</a><button class="chip" data-test="${c.id}">Test rule on the log</button><a class="chip" href="/campaigns/${c.id}/report" download>Download incident report</a></div>
+      <p class="note" id="test-${c.id}"></p>
       </div><div class="side"><button class="btn primary" data-label="attack" data-id="${c.id}">Label as attack</button><button class="btn" data-label="benign" data-id="${c.id}">Label as benign</button><button class="btn" data-open="${i}">Open an example</button></div></div></div>`;
   }).join("");
-  $("#hunt-out").innerHTML = report + retrainBar + (cards || `<div class="panel"><div class="empty"><b>No campaigns right now</b>${d.suspects ? `${d.suspects} possible zero-days are in the log, but a campaign needs at least 8 similar flows.` : "The current model flags nothing in the log as a possible zero-day."} Run the live replay for a minute, then refresh.</div></div>`);
+  $("#hunt-out").innerHTML = report + retrainBar + done + versions + (cards || `<div class="panel"><div class="empty"><b>No campaigns right now</b>${d.suspects ? `${d.suspects} possible zero-days are in the log, but a campaign needs at least 8 similar flows.` : "The current model flags nothing in the log as a possible zero-day."} Run the live replay for a minute, then refresh.</div></div>`);
   document.querySelectorAll("[data-label]").forEach((b) => (b.onclick = async () => {
     b.disabled = true;
-    await api(`/campaigns/${b.dataset.id}/label`, { label: b.dataset.label }).catch(() => null);
+    const r = await api(`/campaigns/${b.dataset.id}/label`, { label: b.dataset.label }).catch(() => null);
+    if (r) toast(`${r.labelled} flows labelled as ${r.label}. Undo is in the list of labelled campaigns.`);
     loadHunt();
   }));
-  document.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => { show("analyze"); fill(d.campaigns[b.dataset.open].example); $("#flow-form").requestSubmit(); }));
+  document.querySelectorAll("[data-undo]").forEach((b) => (b.onclick = async () => {
+    const r = await api(`/campaigns/${b.dataset.undo}/label`, undefined, "DELETE").catch(() => null);
+    if (r) toast(`Label removed from ${r.removed} flows.`);
+    loadHunt();
+  }));
+  document.querySelectorAll("[data-roll]").forEach((b) => (b.onclick = async () => {
+    const r = await api("/learning/rollback", { generation: Number(b.dataset.roll) }).catch(() => null);
+    if (r) { toast("Live model is now " + r.model_version); $("#foot-version").textContent = "model " + r.model_version; }
+    loadHunt();
+  }));
+  document.querySelectorAll("[data-test]").forEach((b) => (b.onclick = async () => {
+    const t = await api(`/campaigns/${b.dataset.test}/rule/test`).catch(() => null);
+    if (t) $("#test-" + b.dataset.test).textContent = `On the ${t.flows} distinct flows in the log the rule matches ${t.matched}: ${Object.entries(t.matched_by_verdict).map(([k, v]) => `${v} ${VERDICT[k].toLowerCase()}`).join(", ") || "none"}.` + (t.matched_true_attack + t.matched_true_normal ? ` By true label: ${t.matched_true_attack} attacks, ${t.matched_true_normal} normal.` : "");
+  }));
+  document.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openFlow(d.campaigns[b.dataset.open].example)));
   const rb = $("#retrain");
-  if (rb) rb.onclick = async () => {
+  if (rb) rb.onclick = () => {
+    // confirm in place instead of a browser dialog
+    $("#retrain-slot").innerHTML = `<span class="confirm"><b>Replace the live model if the challenger wins?</b><button class="btn primary" id="retrain-go">Yes, retrain</button><button class="btn" id="retrain-no">Cancel</button></span>`;
+    $("#retrain-no").onclick = loadHunt;
+    $("#retrain-go").onclick = runRetrain;
+  };
+  async function runRetrain() {
+    const rb = $("#retrain-go");
     rb.disabled = true; rb.textContent = "Training the challenger...";
     lastRetrain = await api("/learning/retrain", {}).catch((e) => ({ promoted: false, reason: (e.data && e.data.detail) || "Retraining failed. Check the service log." }));
+    toast(lastRetrain.promoted ? "Challenger promoted." : "Challenger not promoted.", !lastRetrain.promoted);
     if (lastRetrain.model_version) $("#foot-version").textContent = "model " + lastRetrain.model_version;
     loadHunt();
-  };
+  }
 }
 $("#hunt-refresh").onclick = loadHunt;
+
+// ---------- overview ----------
+async function loadOverview() {
+  skeleton("#overview-out");
+  const o = await api("/overview").catch(() => null);
+  if (!o) { $("#overview-out").innerHTML = `<div class="error-box"><b>The overview could not be loaded.</b> Check that the service is running, then refresh.</div>`; return; }
+  const order = ["attack", "zero_day_suspect", "uncertain", "benign"], total = o.flows || 1;
+  const check = (state, text, go, label) => `<li><i class="mark ${state}"></i><span>${text}</span>${go ? `<button class="chip" data-go="${go}">${label}</button>` : ""}</li>`;
+  const src = Object.entries(o.sources).map(([k, v]) => `${v.toLocaleString()} ${k}`).join(", ");
+  $("#overview-out").innerHTML = `
+    <div class="stats">
+      <button class="stat link" data-go="queue"><b>${o.open_alerts}</b><span>open alerts in the queue</span></button>
+      <button class="stat link" data-go="hunt"><b>${o.campaigns}</b><span>zero-day campaigns to review</span></button>
+      <button class="stat link" data-go="monitor"><b>${{ ok: "No drift", warn: "Early drift", drift: "Drift", waiting: "Waiting" }[o.drift]}</b><span>real traffic vs training data</span></button>
+      <button class="stat link" data-go="monitor"><b>${o.chain.valid ? "Intact" : "Broken"}</b><span>log integrity, ${o.chain.entries.toLocaleString()} entries</span></button>
+      <button class="stat link" data-go="hunt"><b>${o.model.generation ? "Learned " + o.model.generation : "Shipped"}</b><span>live model, threshold ${o.model.threshold}</span></button>
+    </div>
+    <div class="ov-grid">
+      <div class="panel"><h3>Traffic scored</h3>
+        ${o.flows ? `<div class="mix" role="img" aria-label="Verdict mix">${order.map((v) => `<i class="${v}" style="width:${((o.verdicts[v] || 0) / total) * 100}%"></i>`).join("")}</div>
+        <div class="legend">${order.map((v) => `<span><i style="background:var(--${TONE[v]})"></i>${VERDICT[v]} ${(o.verdicts[v] || 0).toLocaleString()}</span>`).join("")}</div>
+        <p class="note">${o.flows.toLocaleString()} flows in the current log: ${esc(src)}.</p>` : `<div class="empty"><b>Nothing scored yet</b>Start the live replay, analyze the sample capture, or score a flow.</div>`}
+        <h3 style="margin:18px 0 6px">Highest-priority open alerts</h3>
+        ${o.top_alerts.length ? `<div class="table-wrap"><table><thead><tr><th>Connection</th><th>Verdict</th><th class="num">Risk</th><th class="num">Priority</th><th>State</th></tr></thead><tbody>${o.top_alerts.map((a, i) => `<tr class="click" data-alert="${i}" tabindex="0"><td class="mono">${esc(a.connection)}</td><td><span class="tag ${a.verdict}">${VERDICT[a.verdict]}</span></td><td class="num">${a.risk_score}</td><td class="num">${a.priority}</td><td>${a.state}</td></tr>`).join("")}</tbody></table></div>` : `<p class="muted">The queue is empty.</p>`}</div>
+      <div class="panel"><h3 style="margin-bottom:12px">Health checks</h3><ul class="checks">
+        ${check(o.chain.valid ? "" : "bad", o.chain.valid ? "Prediction and action logs pass their hash-chain check." : "A log failed its hash-chain check. Treat it as tampered.", "monitor", "Details")}
+        ${check(o.drift === "drift" ? "bad" : o.drift === "warn" ? "warn" : "", { ok: "Real traffic matches the training data.", warn: "Real traffic is starting to move away from the training data.", drift: "Real traffic has drifted from the training data. Retrain.", waiting: "Drift needs 30 real predictions (replay and sample traffic do not count)." }[o.drift], "monitor", "Drift")}
+        ${check(o.open_mode ? "warn" : "", o.open_mode ? "Open mode: no API keys are set, so anyone can label and retrain." : "Labelling and retraining require an API key.", null)}
+        ${check(o.labelled.attack + o.labelled.benign >= 10 ? "warn" : "", `${o.labelled.attack + o.labelled.benign} flows are labelled and waiting for a retrain.`, "hunt", "Hunt")}
+        ${check(o.assets.some((a) => a.exposure >= 60) ? "bad" : o.assets.length ? "" : "warn", o.assets.length ? o.assets.map((a) => `${esc(a.name)} exposure ${a.exposure}`).join(", ") + "." : "No assets registered, so alerts have no priority context.", "assets", "Assets")}
+      </ul>
+      <h3 style="margin:18px 0 8px">Start here</h3><div class="chips"><button class="chip" data-go="live">Replay labelled traffic</button><button class="chip" data-go="capture">Analyze a capture</button><button class="chip" data-go="analyze">Score one flow</button></div></div>
+    </div>`;
+  document.querySelectorAll("#overview-out [data-go]").forEach((b) => (b.onclick = () => show(b.dataset.go)));
+  document.querySelectorAll("#overview-out [data-alert]").forEach((tr) => { tr.onclick = () => openFlow(o.top_alerts[tr.dataset.alert].input); tr.onkeydown = (e) => { if (e.key === "Enter") tr.onclick(); }; });
+}
+$("#overview-refresh").onclick = loadOverview;
+
+// ---------- alert queue ----------
+let queueState = "open";
+async function loadQueue() {
+  skeleton("#queue-out");
+  const d = await api(`/alerts?state=${queueState}&limit=500`).catch(() => null);
+  if (!d) { $("#queue-out").innerHTML = `<div class="error-box"><b>The queue could not be loaded.</b></div>`; return; }
+  const names = { open: "Open", new: "New", investigating: "Investigating", confirmed: "Confirmed", false_positive: "False alarms", all: "All" };
+  const n = { ...d.counts, open: d.counts.new + d.counts.investigating, all: Object.values(d.counts).reduce((a, b) => a + b, 0) };
+  $("#queue-filter").innerHTML = Object.keys(names).map((k) => `<button class="chip ${k === queueState ? "on" : ""}" data-qs="${k}">${names[k]} ${n[k]}</button>`).join("");
+  document.querySelectorAll("[data-qs]").forEach((b) => (b.onclick = () => { queueState = b.dataset.qs; loadQueue(); }));
+  if (!d.items.length) { $("#queue-out").innerHTML = `<div class="panel"><div class="empty"><b>Nothing in this view</b>${queueState === "open" ? "Every alert has been triaged, or no traffic has been flagged yet." : "No alerts have this state."}</div></div>`; return; }
+  $("#queue-out").innerHTML = `<div class="panel"><div id="queue-table"></div><p class="note">Priority is the model's risk scaled by the exposure of the asset under attack. Select a row to open the flow in Analyze.</p></div>`;
+  const rows = d.items.map((a) => ({ ...a, time: a.ts.slice(11, 19), verdict_label: VERDICT[a.verdict] }));
+  dataTable("#queue-table", [{ key: "time", label: "Time (UTC)", mono: 1 }, { key: "connection", label: "Connection", mono: 1 }, { key: "source", label: "Source" },
+    { key: "verdict_label", label: "Verdict", render: (r) => `<span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span>` }, { key: "risk_score", label: "Risk", num: 1 }, { key: "priority", label: "Priority", num: 1 },
+    { key: "state", label: "State", render: (r) => `<select class="inline" data-rid="${r.request_id}" aria-label="State of alert ${r.request_id}">${["new", "investigating", "confirmed", "false_positive"].map((s) => `<option value="${s}" ${s === r.state ? "selected" : ""}>${s.replace("_", " ")}</option>`).join("")}</select>` }],
+    rows, { pageSize: 20, onRow: (r) => openFlow(r.input), after: (el) => el.querySelectorAll("select[data-rid]").forEach((s) => (s.onchange = async () => {
+      const r = await api("/alerts/" + s.dataset.rid, { state: s.value, assignee: "" }, "PATCH").catch(() => null);
+      if (r) toast(s.value === "confirmed" ? "Confirmed. The flow is labelled as an attack for the next retrain." : s.value === "false_positive" ? "Closed as a false alarm. The flow is labelled benign for the next retrain." : "Alert updated.");
+      loadQueue();
+    })) });
+}
 
 // ---------- batch ----------
 let batchResults = null;
 function parseCsv(text) {
-  const lines = text.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) throw new Error("Add a header row and at least one data row.");
-  const head = lines[0].split(",").map((s) => s.trim());
+  // RFC 4180 parsing: quoted fields may contain commas, quotes ("") and line breaks
+  const table = []; let row = [], cell = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) { if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') quoted = false; else cell += ch; }
+    else if (ch === '"') quoted = true;
+    else if (ch === ",") { row.push(cell); cell = ""; }
+    else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; row.push(cell); cell = ""; if (row.some((c) => c.trim() !== "")) table.push(row); row = []; }
+    else cell += ch;
+  }
+  row.push(cell); if (row.some((c) => c.trim() !== "")) table.push(row);
+  if (table.length < 2) throw new Error("Add a header row and at least one data row.");
+  const head = table[0].map((s) => s.trim());
+  if (!contract.features.every((f) => head.includes(f.name))) throw new Error("The header row is missing: " + contract.features.filter((f) => !head.includes(f.name)).map((f) => f.name).join(", ") + ".");
+  const lines = [null, ...table.slice(1)];
   const types = Object.fromEntries(contract.features.map((f) => [f.name, f.type]));
-  return lines.slice(1).map((line) => {
-    const cells = line.split(","), row = {};
+  return lines.slice(1).map((cells) => {
+    const row = {};
     head.forEach((h, i) => { if (h in types) { const v = (cells[i] ?? "").trim(); row[h] = types[h] === "cat" ? v : v === "" || Number.isNaN(Number(v)) ? v : Number(v); } });
     return row;
   });
@@ -351,20 +532,22 @@ $("#batch-run").onclick = async () => {
     batchResults = d.results.map((r, i) => ({ ...flows[i], verdict: r.verdict, risk_score: r.risk_score, attack_family: r.attack_family || "" }));
     d.results.forEach(trace);
     $("#batch-out").innerHTML = `<div class="stats" style="margin-top:16px">${["attack", "zero_day_suspect", "uncertain", "benign"].map((v) => `<div class="stat"><b>${d.verdicts[v] || 0}</b><span>${VERDICT[v]}</span></div>`).join("")}</div>
-      <div class="panel table-wrap"><table><thead><tr><th>#</th><th>Connection</th><th>Verdict</th><th>Family</th><th class="num">Risk</th><th class="num">Attack prob.</th><th class="num">Novelty</th></tr></thead><tbody>
-      ${d.results.map((r, i) => `<tr><td class="num">${i + 1}</td><td class="mono">${esc(flows[i].protocol_type)}/${esc(flows[i].service)} ${esc(flows[i].flag)}</td><td><span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span></td><td>${r.attack_family || ""}</td><td class="num">${r.risk_score}</td><td class="num">${r.attack_probability.toFixed(2)}</td><td class="num">${r.novelty_score.toFixed(2)}</td></tr>`).join("")}</tbody></table></div>`;
+      <div class="panel"><div id="batch-table"></div></div>`;
+    const rows = d.results.map((r, i) => ({ n: i + 1, connection: `${flows[i].protocol_type}/${flows[i].service} ${flows[i].flag}`, verdict: r.verdict, verdict_label: VERDICT[r.verdict], family: r.attack_family || "", risk: r.risk_score, p: Number(r.attack_probability.toFixed(2)), nov: Number(r.novelty_score.toFixed(2)), flow: flows[i] }));
+    dataTable("#batch-table", [{ key: "n", label: "#", num: 1 }, { key: "connection", label: "Connection", mono: 1 }, { key: "verdict_label", label: "Verdict", render: (r) => `<span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span>` }, { key: "family", label: "Family" }, { key: "risk", label: "Risk", num: 1 }, { key: "p", label: "Attack prob.", num: 1 }, { key: "nov", label: "Novelty", num: 1 }], rows, { onRow: (r) => openFlow(r.flow) });
     $("#batch-download").hidden = false;
   } catch (err) { showValidation(err, "#batch-error"); }
 };
 $("#batch-download").onclick = () => {
   const cols = Object.keys(batchResults[0]);
-  const csv = [cols.join(","), ...batchResults.map((r) => cols.map((c) => r[c]).join(","))].join("\n");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = "zerowatch_results.csv"; a.click();
+  // quote every field, and neutralise cells a spreadsheet would run as a formula (=, +, -, @)
+  const safe = (v) => { let s = String(v ?? ""); if (/^[=+\-@\t\r]/.test(s) && Number.isNaN(Number(s))) s = "'" + s; return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  download("zerowatch_results.csv", [cols.join(","), ...batchResults.map((r) => cols.map((c) => safe(r[c])).join(","))].join("\n"), "text/csv");
 };
 
 // ---------- model ----------
 async function loadModel() {
+  skeleton("#model-out");
   const m = await api("/model/info"), t = m.metrics, z = t.zero_day_recall;
   const imp = Object.entries(m.feature_importance).sort((a, b) => b[1] - a[1]).slice(0, 10), top = imp.length ? imp[0][1] : 1;
   const params = Object.entries(m.params).filter(([k]) => !["algorithm", "seed", "train_rows"].includes(k)).map(([k, v]) => `${k}=${v}`).join(", ");
@@ -388,6 +571,11 @@ async function loadModel() {
     </div>
     ${m.experiments.length ? `<div class="panel table-wrap" style="margin-top:16px"><h3 style="margin-bottom:10px">Experiments tracked in MLflow</h3><table><thead><tr><th>Run</th><th>Algorithm</th><th>Hyperparameters</th><th class="num">Val F1</th><th class="num">Test acc.</th><th class="num">Test F1</th><th class="num">Ensemble F1</th><th class="num">Zero-day recall</th></tr></thead><tbody>
       ${m.experiments.map((e) => `<tr class="${e.promoted ? "best" : ""}"><td class="mono">${esc(e.run)}${e.promoted ? " (deployed)" : ""}</td><td>${esc(e.algorithm)}</td><td class="mono">${esc(e.hyperparameters)}</td><td class="num">${e.val_f1.toFixed(4)}</td><td class="num">${e.test_accuracy.toFixed(4)}</td><td class="num">${e.test_f1.toFixed(4)}</td><td class="num">${e.ensemble_test_f1.toFixed(4)}</td><td class="num">${pct(e.zero_day_recall_ensemble)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${m.threshold_curve.length ? `<div class="panel" style="margin-top:16px"><h3>Decision threshold</h3>
+      <p class="muted" style="margin:6px 0 12px;font-size:.88rem;max-width:80ch">A flow is called a known attack when its attack probability reaches this value. Lower it to catch more attacks at the cost of more false alarms. Figures are for the full verdict on held-out KDDTest+.</p>
+      <input class="slider" id="thr" type="range" min="0.05" max="0.95" step="0.05" value="${m.threshold}" aria-label="Decision threshold">
+      <div class="stats" style="margin:12px 0 0"><div class="stat"><b id="thr-v"></b><span>threshold</span></div><div class="stat"><b id="thr-r"></b><span>attacks caught</span></div><div class="stat"><b id="thr-f"></b><span>false alarms on normal traffic</span></div><div class="stat"><b id="thr-p"></b><span>flagged flows that are real attacks</span></div></div>
+      <div class="form-foot"><button class="btn primary" id="thr-apply">Apply to the live model</button><span class="muted" id="thr-note"></span></div></div>` : ""}
     ${m.cross_dataset ? (() => { const x = m.cross_dataset.results, cell = (tr, te) => x.find((r) => r.trained_on === tr && r.tested_on === te).f1;
       const td = (v) => `<td class="cell" style="background:color-mix(in srgb, var(--${v >= 0.75 ? "benign" : v >= 0.5 ? "suspect" : "attack"}) ${Math.round(12 + v * 18)}%, transparent)">${v.toFixed(3)}</td>`;
       return `<div class="panel table-wrap" style="margin-top:16px"><h3>Does it generalise to another network?</h3>
@@ -400,21 +588,37 @@ async function loadModel() {
       <div class="panel table-wrap"><h3 style="margin-bottom:10px">Data contract</h3><table><thead><tr><th>Feature</th><th>Type</th><th>Allowed</th></tr></thead><tbody>
         ${contract.features.map((f) => `<tr title="${esc(f.why)}"><td class="mono">${f.name}</td><td>${f.type === "cat" ? "category" : f.type}</td><td class="mono">${f.type === "cat" ? (f.values.length > 12 ? f.values.length + " service names" : f.values.join(", ")) : f.min + " to " + f.max}</td></tr>`).join("")}</tbody></table></div>
     </div>`;
+  wireThreshold(m);
+}
+
+function wireThreshold(m) {
+  const s = $("#thr"); if (!s) return;
+  const paint = () => {
+    const c = m.threshold_curve.reduce((a, b) => (Math.abs(b.threshold - s.value) < Math.abs(a.threshold - s.value) ? b : a));
+    $("#thr-v").textContent = Number(s.value).toFixed(2); $("#thr-r").textContent = pct(c.recall); $("#thr-f").textContent = pct(c.fpr); $("#thr-p").textContent = pct(c.precision);
+    $("#thr-note").textContent = Number(s.value) === m.threshold ? "This is the live setting." : `Live setting is ${m.threshold}.`;
+  };
+  s.oninput = paint; paint();
+  $("#thr-apply").onclick = async () => {
+    const r = await api("/settings/threshold", { threshold: Number(s.value) }).catch((e) => { if (e.status === 422) toast("That value is not allowed: it must stay above the review band.", true); return null; });
+    if (r) { m.threshold = r.threshold; paint(); toast("Threshold is now " + r.threshold + ". The change is recorded in the action log."); }
+  };
 }
 
 // ---------- monitoring ----------
 async function loadMonitor() {
-  const [d, r, a, b] = await Promise.all([api("/monitoring/drift"), api("/monitoring/recent?limit=15"), api("/audit/verify"), api("/brief")]);
+  if (!$("#monitor-out").children.length) skeleton("#monitor-out");
+  const [d, r, a, b, al, ac] = await Promise.all([api("/monitoring/drift"), api("/monitoring/recent?limit=15"), api("/audit/verify"), api("/brief"), api("/monitoring/alarm"), api("/audit/actions?limit=12")]);
   const word = { ok: "No drift", warn: "Early drift", drift: "Drift detected", waiting: "Collecting data" }[d.status];
   const drift = d.enough_data ? `<div class="table-wrap"><table><thead><tr><th>Feature</th><th class="num">Training</th><th class="num">Live</th><th>Shift</th><th>Status</th></tr></thead><tbody>
     ${d.features.slice(0, 12).map((f) => `<tr><td class="mono">${f.feature}</td><td class="num">${f.kind === "num" ? f.train_mean : pct(f.train_top_share)}</td><td class="num">${f.kind === "num" ? f.live_mean : esc(f.live_top) + " " + pct(f.live_top_share)}</td>
       <td><span class="mini"><b class="${f.status}" style="width:${Math.min(100, f.shift * 100)}%"></b></span><span class="mono">${f.shift.toFixed(2)}</span></td><td>${f.status}</td></tr>`).join("")}</tbody></table></div>
     <p class="muted" style="font-size:.82rem;margin-top:10px">Shift is the distance between live and training means in training standard deviations (or the change in category shares). Above 0.25 is a warning, above 0.5 is drift and a reason to retrain.</p>`
-    : `<p class="muted">Drift needs at least 30 logged predictions. ${d.rows} logged so far. Run the live replay for a few seconds, then refresh.</p>`;
+    : `<p class="muted">Drift needs at least 30 real predictions and has ${d.rows}. Replayed and sample traffic are left out on purpose, so a demo cannot look like drift. Score flows, run a batch or upload a capture.</p>`;
   $("#monitor-out").innerHTML = `
     <div class="stats"><div class="stat"><b>${word}</b><span>from ${d.rows.toLocaleString()} logged inputs</span></div>
       ${["attack", "zero_day_suspect", "uncertain"].map((v) => `<div class="stat"><b>${r.verdicts[v] || 0}</b><span>${VERDICT[v]}, recent</span></div>`).join("")}
-      <div class="stat"><b>${a.valid ? "Intact" : "Broken"}</b><span>log hash chain, ${a.entries.toLocaleString()} entries${a.valid ? "" : ", line " + a.broken_at_line}</span></div></div>
+      <div class="stat"><b>${a.valid ? "Intact" : "Broken"}</b><span>log hash chains, ${a.entries.toLocaleString()} predictions and ${a.actions.entries} actions${a.valid ? "" : ", problem at line " + (a.broken_at_line || a.actions.broken_at_line)}</span></div></div>
     <div class="panel"><h3>Shift report</h3><p style="margin-top:8px"><b>${esc(b.headline)}</b></p>
       <ul class="brief">${b.points.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>
       ${b.actions.length ? `<h3 style="margin:14px 0 8px">Do first</h3><ul class="tips">${b.actions.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}</div>
@@ -423,10 +627,21 @@ async function loadMonitor() {
       <form class="ask" id="ask-form"><input id="ask-q" maxlength="300" placeholder="Ask about the traffic this service has scored" aria-label="Question"><button class="btn primary">Ask</button></form>
       <div id="ask-out"></div></div>
     <div class="panel"><h3 style="margin-bottom:10px">Input drift against training data</h3>${drift}</div>
-    <div class="panel table-wrap"><h3 style="margin-bottom:10px">Latest predictions in the log</h3>
+    <div class="cols"><div class="panel"><h3>Alarm</h3>
+      <p style="font-size:.9rem;margin-top:8px">${al.interval_seconds > 0 ? `Drift and log integrity are checked every ${Math.round(al.interval_seconds / 60)} minutes.` : "The timed check is switched off."} ${al.webhook ? "A message is sent to the configured webhook when drift appears or a log chain breaks." : "No webhook is configured, so nothing is sent. Set ALERT_WEBHOOK_URL to a Slack-style webhook."}</p>
+      <p class="note">${al.last_check ? "Last check " + new Date(al.last_check * 1000).toISOString().slice(11, 19) + " UTC: drift " + al.drift + ", log " + (al.chain_valid ? "intact" : "broken") + "." : "No check has run yet."}${al.last_sent ? " Last message sent " + new Date(al.last_sent * 1000).toISOString().slice(11, 19) + " UTC." : ""}</p>
+      <div class="form-foot"><button class="btn" id="alarm-test">Run the check now and send a test message</button></div></div>
+    <div class="panel table-wrap"><h3 style="margin-bottom:10px">Analyst and admin actions</h3>
+      ${ac.items.length ? `<table><thead><tr><th>Time (UTC)</th><th>Role</th><th>Action</th><th>Detail</th></tr></thead><tbody>${ac.items.map((e) => `<tr><td class="mono">${esc(e.ts.slice(11, 19))}</td><td>${esc(e.role)}</td><td class="mono">${esc(e.action)}</td><td class="mono">${esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" "))}</td></tr>`).join("")}</tbody></table><p class="note">This log is hash-chained too, so an action cannot be quietly removed.</p>` : `<p class="muted">No labels, retrains or setting changes yet.</p>`}</div></div>
+    <div class="panel table-wrap" style="margin-top:16px"><h3 style="margin-bottom:10px">Latest predictions in the log</h3>
       ${r.items.length ? `<table><thead><tr><th>Time (UTC)</th><th>Request</th><th>Connection</th><th>Verdict</th><th class="num">Risk</th></tr></thead><tbody>${r.items.map((e) => `<tr><td class="mono">${esc(e.ts.slice(11, 19))}</td><td class="mono">${esc(e.request_id)}</td><td class="mono">${esc(e.input.protocol_type)}/${esc(e.input.service)} ${esc(e.input.flag)}</td><td><span class="tag ${e.output.verdict}">${VERDICT[e.output.verdict]}</span></td><td class="num">${e.output.risk_score}</td></tr>`).join("")}</tbody></table>`
       : `<p class="muted">Nothing scored since the service started.</p>`}</div>`;
 }
+document.addEventListener("click", async (e) => {
+  if (e.target.id !== "alarm-test") return;
+  const r = await api("/monitoring/alarm/test", {}).catch(() => null);
+  if (r) { toast(r.webhook ? (r.sent ? "Check done and test message sent." : "Check done, but the webhook did not accept the message.") : "Check done. No webhook is configured.", r.webhook && !r.sent); loadMonitor(); }
+});
 async function ask(q) {
   if (!q || q.length < 3) return;
   $("#ask-out").innerHTML = `<div class="answer muted">Thinking...</div>`;
@@ -445,6 +660,8 @@ $("#monitor-refresh").onclick = loadMonitor;
     $("#foot-version").textContent = "model " + h.model_version;
     contract = await api("/contract");
     buildForm();
+    refreshAuth();
+    show(location.hash.slice(1) || "analyze", "boot");
   } catch (e) {
     $("#health").innerHTML = `<i class="dot bad"></i>API unreachable`;
   }

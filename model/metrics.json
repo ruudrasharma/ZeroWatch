@@ -39,7 +39,7 @@
       "ensemble": 0.7671,
       "unseen_attack_flows": 3533
     },
-    "family_accuracy": 0.7523,
+    "family_accuracy": 0.7774,
     "conformal": {
       "alpha": 0.05,
       "qhat": 0.02,
@@ -48,8 +48,8 @@
       "missed_attacks_sent_to_review": 0.4851
     }
   },
-  "trained_at": "2026-11-15T08:48:41+00:00",
-  "git_sha": "c34c5f1",
+  "trained_at": "2026-11-15T10:09:17+00:00",
+  "git_sha": "5605afe",
   "rows": {
     "fit": 96993,
     "validation": 24249,
