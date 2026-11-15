@@ -2,6 +2,9 @@
 *
 !requirements-serve.txt
 !app.py
+!routes_hunt.py
+!routes_ops.py
+!routes_traffic.py
 !features.py
 !drift_check.py
 !learning.py

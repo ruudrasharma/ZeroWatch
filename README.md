@@ -118,9 +118,31 @@ Around the loop:
   so the rate limit cannot be bypassed by sending a fake header.
 - **Model pin.** `MODEL_SHA256` in the environment outranks `model/model.sha256`.
 
+- **Shadow mode.** "Retrain and run in shadow first" keeps the live model and lets the challenger score the
+  same traffic silently. Hunt shows how often they agree and, for replayed traffic, whether the challenger's
+  extra flags are real attacks, before anyone promotes it. `AUTO_RETRAIN=1` starts such a retrain on a timer
+  when 50 new labels arrive or drift is detected; an unattended retrain only ever goes to shadow.
+- **Named accounts.** `USERS="asha:analyst:<key>,ravi:admin:<key>"` gives each person a key, and the action
+  log records the name as well as the role.
+- **Read access.** With keys configured, a visitor without one can score flows and watch the replay, but
+  cannot read the alert queue, campaigns or action log, upload captures or use the copilot, and the replay
+  they watch is not written to the log.
+- **Browser hardening.** Content-Security-Policy with scripts from this origin only, HSTS behind the proxy,
+  self-hosted fonts and no third-party requests. `DOCS_ENABLED=0` hides `/docs`.
+- **Block list and exports.** A capture produces iptables and nftables rules for the sources that scanned or
+  flooded. A campaign exports as Sigma, as a STIX 2.1 bundle and as a Markdown incident report.
+- **Zeek.** The Capture tab also accepts a Zeek `conn.log` (TSV or JSON), as well as pcap and pcapng.
+- **Model tab.** Confusion matrix, attacks caught per family (DoS 95%, Probe 99%, R2L 15%, U2R 42%) and the
+  ROC curve, all on held-out KDDTest+.
+- **Speed.** Batches, captures and the replay are scored with one model call for all flows: 500 flows take
+  about 0.1 s where they took 10 s, and a 3,000-connection capture about 1 s where it took 40 s.
+
 | Variable | Purpose | Default |
 |---|---|---|
 | `ANALYST_TOKEN`, `ADMIN_TOKEN` | API keys for the two roles | unset (open mode) |
+| `USERS` | named accounts, `name:role:key` separated by commas | unset |
+| `AUTO_RETRAIN`, `AUTO_RETRAIN_MIN_LABELS` | scheduled retraining into shadow | `0`, `50` |
+| `DOCS_ENABLED` | serve `/docs` | `1` |
 | `TRUST_PROXY` | believe the last `X-Forwarded-For` hop | `0` |
 | `RATE_LIMIT_PER_MIN` | scoring requests per client per minute | `600` |
 | `MODEL_SHA256` | expected hash of `model/model.joblib` | from `model.sha256` |
@@ -188,11 +210,14 @@ ZeroWatch/
 │   ├── train_cache.npz         # compact training data so the service can retrain a challenger
 │   └── experiments.json        # MLflow runs exported for the UI
 ├── static/                     # index.html, styles.css, app.js (console UI, light + dark)
-├── tests/test_app.py           # 41 API tests
-├── tests/test_ui.py            # 5 browser tests of the console (Playwright)
+├── tests/test_app.py           # 57 API tests
+├── tests/test_ui.py            # 8 browser tests of the console (Playwright)
 ├── logs/sample_predictions.jsonl
 ├── .github/workflows/ci.yml    # install -> train -> pytest -> docker smoke test -> deploy
-├── app.py                      # FastAPI app + Pydantic schema
+├── app.py                      # FastAPI app + Pydantic schema, model loading, scoring, core routes
+├── routes_traffic.py           # replay, capture and Zeek scoring, assets
+├── routes_hunt.py              # campaigns, rules, retraining, shadow mode, model versions
+├── routes_ops.py               # alert queue, monitoring, copilot, settings, overview
 ├── train.py                    # training with MLflow tracking
 ├── features.py                 # the contract and encoding shared by train.py and app.py
 ├── learning.py                 # campaigns, generated rules, challenger retraining, evasion search
@@ -208,7 +233,8 @@ ZeroWatch/
 ├── Dockerfile                  # python:3.11-slim, requirements-serve.txt only
 ├── render.yaml                 # Render blueprint
 ├── requirements.txt            # dev + training
-├── requirements-serve.txt      # lean serving runtime
+├── requirements-serve.in       # the seven serving packages
+├── requirements-serve.txt      # the same, locked with SHA-256 hashes (what Docker installs)
 └── backend/ frontend/ ml/ monitoring/   # extended local platform, see the end of this file
 ```
 
@@ -238,7 +264,8 @@ docker run -d -p 8000:8000 --restart unless-stopped zerowatch
 ```
 
 Image size: about 137 MB as reported by `docker image inspect` in CI (python:3.11-slim plus 7 serving
-packages; no MLflow, pandas or pytest).
+packages; no MLflow, pandas or pytest). The base image is pinned by digest and every package is installed
+with `--require-hashes` from the locked `requirements-serve.txt`; Dependabot proposes updates weekly.
 
 ### Deploy (Render)
 
@@ -302,6 +329,9 @@ Run 7 is also registered in the MLflow Model Registry as `zerowatch-detector` wi
 | `POST /capture`, `GET /capture/sample` | Score a `.pcap`: flows, verdicts and the host graph |
 | `POST /assets`, `GET /assets`, `DELETE /assets/{name}` | Register an asset and scan its exposure |
 | `POST /copilot` | Ask a question about the scored traffic |
+| `GET /simulate/stream` | The replay as Server-Sent Events |
+| `GET /learning/shadow`, `POST /learning/shadow/promote`, `DELETE /learning/shadow` | Challenger running beside the live model |
+| `GET /campaigns/{id}/stix`, `GET /alerts/{id}` | STIX 2.1 bundle; one alert with its flow |
 | `GET /overview`, `GET /alerts`, `PATCH /alerts/{id}` | Dashboard summary; triage queue |
 | `GET /campaigns/{id}/rule`, `/rule/test`, `/report` | Sigma rule, its hits on the log, incident report |
 | `GET /learning/status`, `POST /learning/rollback` | Saved model versions; make one live |
@@ -331,7 +361,7 @@ What the service adds on top of a plain prediction:
 
 ## Tests
 
-`pytest -v --tb=short` runs 46 tests: 41 against the API in `tests/test_app.py` and 5 that drive the console
+`pytest -v --tb=short` runs 65 tests: 57 against the API in `tests/test_app.py` and 8 that drive the console
 in a real browser in `tests/test_ui.py` (skipped if Playwright's Chromium is not installed). Coverage of the
 serving code is 88% and CI fails below 85%. The four required tests:
 

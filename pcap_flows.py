@@ -198,7 +198,7 @@ def to_flows(conns: list[dict]) -> list[dict]:
     out, recent, last = [], deque(), deque(maxlen=255)
     for c in sorted(conns, key=lambda c: c["start"]):
         if c["proto"] == "tcp":
-            flag, service = _tcp_flag(c), PORTS.get(c["dport"], "private")
+            flag, service = c.get("flag") or _tcp_flag(c), PORTS.get(c["dport"], "private")
         elif c["proto"] == "udp":
             flag, service = "SF", UDP_PORTS.get(c["dport"], "private")
         else:
@@ -226,6 +226,77 @@ def to_flows(conns: list[dict]) -> list[dict]:
         }
         out.append({"flow": flow, "src": c["src"], "dst": c["dst"], "dport": c["dport"], "start": round(c["start"], 3)})
     return out
+
+
+ZEEK_STATES = {"S0": "S0", "S1": "S1", "SF": "SF", "REJ": "REJ", "S2": "S2", "S3": "S3", "RSTO": "RSTO", "RSTR": "RSTR",
+               "RSTOS0": "RSTOS0", "RSTRH": "RSTR", "SH": "SH", "SHR": "SH", "OTH": "OTH"}
+
+
+def is_zeek(data: bytes) -> bool:
+    head = data[:200].lstrip()
+    return head.startswith(b"#separator") or head.startswith(b"#fields") or (head.startswith(b"{") and b"id.orig_h" in data[:2000])
+
+
+def parse_zeek(data: bytes) -> list[dict]:
+    """Zeek conn.log (TSV with a #fields header, or JSON lines) -> the same connection records
+    connections() builds from packets. Zeek has already tracked each connection, so its
+    conn_state is used as the flag directly."""
+    text = data.decode("utf-8", "replace")
+    rows, fields = [], None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("#"):
+            if line.startswith("#fields"):
+                fields = line.split("\t")[1:]
+            continue
+        if line.lstrip().startswith("{"):
+            import json
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+        elif fields:
+            rows.append(dict(zip(fields, line.split("\t"), strict=False)))
+        if len(rows) >= MAX_PACKETS:
+            break
+    need = {"ts", "id.orig_h", "id.resp_h", "id.resp_p", "proto"}
+    if not rows or not need <= set(rows[0]):
+        raise PcapError("This does not look like a Zeek conn.log: it needs ts, id.orig_h, id.resp_h, id.resp_p and proto.")
+
+    def num(v, cast=float):
+        try:
+            return cast(float(v))
+        except (TypeError, ValueError):
+            return cast(0)
+
+    conns = []
+    for r in rows:
+        proto = str(r["proto"]).lower()
+        if proto not in ("tcp", "udp", "icmp"):
+            continue
+        start, dur = num(r["ts"]), num(r.get("duration"))
+        conns.append({"proto": proto, "src": str(r["id.orig_h"]), "sport": num(r.get("id.orig_p"), int), "dst": str(r["id.resp_h"]),
+                      "dport": num(r["id.resp_p"], int), "start": start, "end": start + dur,
+                      "src_bytes": num(r.get("orig_bytes"), int), "dst_bytes": num(r.get("resp_bytes"), int),
+                      "flag": ZEEK_STATES.get(str(r.get("conn_state", "")), "OTH")})
+    if not conns:
+        raise PcapError("The conn.log has no TCP, UDP or ICMP connections.")
+    return conns
+
+
+def timeline(items: list[dict], results: list[dict], sources: list[dict], buckets: int = 40) -> dict:
+    """Activity over time for the riskiest sources: per time bucket, how many flows and the highest risk."""
+    t0, t1 = min(i["start"] for i in items), max(i["start"] for i in items)
+    width = max((t1 - t0) / buckets, 1e-9)
+    rows = {s["ip"]: [[0, 0] for _ in range(buckets)] for s in sources[:8]}
+    for it, r in zip(items, results, strict=True):
+        if it["src"] in rows:
+            cell = rows[it["src"]][min(buckets - 1, int((it["start"] - t0) / width))]
+            cell[0] += 1
+            cell[1] = max(cell[1], r["risk_score"])
+    return {"bucket_seconds": round(width, 3), "span_seconds": round(t1 - t0, 1),
+            "sources": [{"ip": ip, "buckets": b} for ip, b in rows.items()]}
 
 
 def host_graph(items: list[dict], results: list[dict]) -> dict:

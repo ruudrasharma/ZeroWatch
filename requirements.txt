@@ -1,5 +1,13 @@
-# Full development + training environment (superset of requirements-serve.txt).
--r requirements-serve.txt
+# Full development + training environment. The first seven lines are the serving packages
+# (same versions as requirements-serve.in; the Docker image installs the hash-locked
+# requirements-serve.txt instead).
+fastapi==0.163.0
+uvicorn==0.54.0
+pydantic==2.14.3
+scikit-learn==1.9.1
+numpy==2.4.6
+joblib==1.6.0
+prometheus-client==0.26.0
 pandas==3.1.1
 mlflow==3.18.0
 pytest==9.2.0

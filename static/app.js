@@ -11,7 +11,7 @@ const GROUPS = [
   ["Same source, last two seconds", ["count", "srv_count", "serror_rate", "rerror_rate", "same_srv_rate", "diff_srv_rate"]],
   ["Destination host history", ["dst_host_count", "dst_host_srv_count", "dst_host_serror_rate"]],
 ];
-let contract = null, lastFlow = null, lastResult = null, liveTimer = null;
+let contract = null, lastFlow = null, lastResult = null, liveTimer = null, me = { role: "viewer", user: "anonymous", open_mode: false };
 
 function apiKey() { try { return sessionStorage.getItem("zw-key") || ""; } catch (e) { return ""; } }
 async function api(path, body, method) {
@@ -31,8 +31,10 @@ async function api(path, body, method) {
 function toast(text, bad) {
   const t = document.createElement("div");
   t.className = "toast" + (bad ? " bad" : ""); t.textContent = text;
+  const x = document.createElement("button"); x.textContent = "Dismiss"; x.onclick = () => t.remove(); t.appendChild(x);
   $("#toasts").appendChild(t);
-  setTimeout(() => t.remove(), 4200);
+  if (!bad) setTimeout(() => t.remove(), 5000);  // errors stay until dismissed
+  while ($("#toasts").children.length > 4) $("#toasts").firstChild.remove();
 }
 const skeleton = (sel) => { $(sel).innerHTML = '<div class="skeleton"></div><div class="skeleton tall"></div>'; };
 function download(name, text, type) {
@@ -57,14 +59,23 @@ function dataTable(sel, columns, rows, opts = {}) {
     el.querySelectorAll("[data-pg]").forEach((b) => (b.onclick = () => { st.page += Number(b.dataset.pg); draw(); }));
     el.querySelectorAll("th[data-k]").forEach((th) => (th.onclick = () => { st.dir = st.sort === th.dataset.k ? -st.dir : 1; st.sort = th.dataset.k; draw(); }));
     if (opts.onRow) el.querySelectorAll("tbody tr[data-i]").forEach((tr) => {
-      tr.onclick = (e) => { if (!e.target.closest("select,button,a")) opts.onRow(rows[tr.dataset.i]); };
-      tr.onkeydown = (e) => { if (e.key === "Enter") opts.onRow(rows[tr.dataset.i]); };
+      tr.onclick = (e) => { if (!e.target.closest("select,button,a,input")) opts.onRow(rows[tr.dataset.i]); };
+      tr.onkeydown = (e) => { if (e.key === "Enter" && e.target === tr) opts.onRow(rows[tr.dataset.i]); };
     });
     if (opts.after) opts.after(el);
   }
   draw();
 }
 function openFlow(flow) { show("analyze"); fill(flow); $("#flow-form").requestSubmit(); }
+async function openAlert(id) { const a = await api("/alerts/" + id).catch(() => null); if (a) openFlow(a.input); }
+// Views that need a key when the service is protected show a sign-in prompt instead of an error.
+async function guarded(sel, fn) {
+  try { await fn(); }
+  catch (e) {
+    $(sel).innerHTML = e.status === 401 ? `<div class="panel"><div class="empty"><b>Sign in to see this</b>This view shows analyst data. Use Sign in at the top with an analyst or admin key.</div></div>`
+      : `<div class="error-box"><b>This view could not be loaded${e.status ? " (HTTP " + e.status + ")" : ""}.</b> Check that the service is running, then try again.</div>`;
+  }
+}
 
 // ---------- theme ----------
 function setTheme(t) {
@@ -79,7 +90,7 @@ setTheme(document.documentElement.dataset.theme);
 const loaders = { model: loadModel, monitor: loadMonitor, hunt: loadHunt, assets: loadAssets, overview: loadOverview, queue: loadQueue };
 document.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => show(b.dataset.view)));
 // Each view has its own #hash, so the back button and shared links work.
-function show(view, fromHash) {
+function show(view, fromHash, keepFocus) {
   if (!document.getElementById("view-" + view)) view = "analyze";
   document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.view === view));
   document.querySelectorAll("main > section").forEach((s) => (s.hidden = s.id !== "view-" + view));
@@ -87,7 +98,7 @@ function show(view, fromHash) {
   document.title = $("#tab-" + view).textContent + " | ZeroWatch";
   if (view !== "live" && liveTimer) $("#live-toggle").click();  // do not keep replaying in the background
   if (loaders[view] && contract) loaders[view]();
-  if (fromHash !== "boot") $("#view-" + view).focus({ preventScroll: true });
+  if (fromHash !== "boot" && !keepFocus) $("#view-" + view).focus({ preventScroll: true });
   $("#tab-" + view).scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 window.addEventListener("popstate", () => show(location.hash.slice(1) || "analyze", true));
@@ -96,7 +107,8 @@ window.addEventListener("popstate", () => show(location.hash.slice(1) || "analyz
 async function refreshAuth() {
   const w = await api("/auth/whoami").catch(() => null);
   if (!w) return;
-  $("#auth-btn").textContent = w.open_mode ? "Open mode" : w.role === "viewer" ? "Sign in" : "Signed in: " + w.role;
+  me = w;
+  $("#auth-btn").textContent = w.open_mode ? "Open mode" : w.role === "viewer" ? "Sign in" : `Signed in: ${w.user} (${w.role})`;
   $("#auth-note").textContent = w.open_mode ? "No keys are configured on this service, so every action is allowed. Set ANALYST_TOKEN and ADMIN_TOKEN before exposing it."
     : w.role === "viewer" ? "Scoring works without a key. Labelling and triage need the analyst key; retraining, rollback, assets and settings need the admin key."
     : `You are signed in as ${w.role}. The key is kept for this browser tab only.`;
@@ -177,6 +189,7 @@ $("#flow-form").onsubmit = async (e) => {
     const r = await api("/predict", flow);
     lastFlow = flow; lastResult = r;
     renderResult(r); trace(r);
+    if ($("#result").getBoundingClientRect().top > innerHeight * 0.6) $("#result").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
     $("#result").innerHTML = `<div class="empty"><b>Nothing was scored</b>The input was rejected before it reached the model. Fix the highlighted fields and score the flow again.</div>`;
     if (err.status) showValidation(err, "#form-error");
@@ -251,12 +264,11 @@ function renderResult(r) {
 // ---------- live ----------
 const live = { flows: 0, flagged: 0, zero: 0, missed: 0, false_alarm: 0, unseen: 0, review: 0 };
 function liveStats() {
+  if (!$("#live-note")) $("#live-stats").insertAdjacentHTML("afterend", '<p class="note warn" id="live-note" style="margin:-6px 0 12px"></p>');
   const s = [[live.flows, "flows replayed"], [live.flagged, "flagged"], [`${live.zero} of ${live.unseen}`, "unseen attack types flagged"], [live.review, "sent to review"], [live.missed, "attacks missed"], [live.false_alarm, "false alarms"]];
   $("#live-stats").innerHTML = s.map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
 }
-async function liveTick() {
-  const data = await api("/simulate?n=8").catch(() => null);
-  if (!data) return;
+function liveRender(data) {
   const body = $("#live-rows");
   if (!live.flows) body.innerHTML = "";
   for (const ev of data.events) {
@@ -282,9 +294,30 @@ async function liveTick() {
   while (body.children.length > 60) body.lastChild.remove();
   liveStats();
 }
+// The replay is pushed by the server (Server-Sent Events read with fetch, so the API key can be sent).
+async function liveStream(signal) {
+  const res = await fetch("/simulate/stream?n=8", { signal, headers: apiKey() ? { "x-api-key": apiKey() } : {} });
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let cut;
+    while ((cut = buf.indexOf("\n\n")) >= 0) {
+      const line = buf.slice(0, cut); buf = buf.slice(cut + 2);
+      if (line.startsWith("data: ")) { const d = JSON.parse(line.slice(6)); liveRender(d); $("#live-note").textContent = d.logged ? "" : "Not written to the log: sign in to keep replayed traffic for Hunt and the queue."; }
+    }
+  }
+}
 $("#live-toggle").onclick = () => {
-  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; $("#live-toggle").textContent = "Resume replay"; }
-  else { liveTick(); liveTimer = setInterval(liveTick, 1400); $("#live-toggle").textContent = "Pause replay"; }
+  if (liveTimer) { liveTimer.abort(); liveTimer = null; $("#live-toggle").textContent = "Resume replay"; }
+  else { liveTimer = new AbortController(); liveStream(liveTimer.signal).catch(() => {}); $("#live-toggle").textContent = "Pause replay"; }
+};
+$("#live-reset").onclick = () => {
+  for (const k of Object.keys(live)) live[k] = 0;
+  $("#live-rows").innerHTML = `<tr><td colspan="6" class="empty">Counters reset. Start the replay to stream flows through the model.</td></tr>`;
+  liveStats();
 };
 liveStats();
 
@@ -302,6 +335,13 @@ function graphSvg(g) {
     ${srcs.map((s) => `<circle cx="160" cy="${sy[s.ip]}" r="${s.behaviour === "normal" ? 6 : 9}" fill="${tone(s.source_risk)}"/><text x="146" y="${sy[s.ip] + 4}" text-anchor="end">${esc(s.ip)}${s.behaviour !== "normal" ? " (" + s.behaviour + ")" : ""}</text>`).join("")}
     ${dsts.map((d) => `<circle cx="600" cy="${dy[d]}" r="7" fill="var(--muted)"/><text x="614" y="${dy[d] + 4}">${esc(d)}</text>`).join("")}</svg>`;
 }
+function timelineSvg(t) {
+  const n = t.sources[0] ? t.sources[0].buckets.length : 0, w = 14, rowH = 22, left = 110, peak = Math.max(1, ...t.sources.flatMap((s) => s.buckets.map((b) => b[0])));
+  const tone = (r) => (r >= 65 ? "var(--attack)" : r >= 40 ? "var(--suspect)" : "var(--benign)");
+  return `<svg class="tl" viewBox="0 0 ${left + n * w + 10} ${t.sources.length * rowH + 22}" role="img" aria-label="Flows per source over time">
+    ${t.sources.map((s, i) => `<text x="${left - 8}" y="${i * rowH + 15}" text-anchor="end">${esc(s.ip)}</text>` + s.buckets.map((b, k) => b[0] ? `<rect x="${left + k * w}" y="${i * rowH + 3}" width="${w - 2}" height="${rowH - 6}" rx="2" fill="${tone(b[1])}" opacity="${0.3 + 0.7 * Math.sqrt(b[0] / peak)}"><title>${s.ip}: ${b[0]} flows, highest risk ${b[1]}</title></rect>` : "").join("")).join("")}
+    <text x="${left}" y="${t.sources.length * rowH + 16}">0 s</text><text x="${left + n * w}" y="${t.sources.length * rowH + 16}" text-anchor="end">${t.span_seconds} s</text></svg>`;
+}
 function renderCapture(d) {
   const bad = d.graph.sources.filter((s) => s.behaviour !== "normal");
   $("#cap-out").innerHTML = `
@@ -312,6 +352,11 @@ function renderCapture(d) {
         <p class="note" style="margin-bottom:8px">${bad.length ? `${bad.length} source(s) behave like a scanner or flooder across their flows.` : "No source behaves like a scanner or flooder."}</p>
         <table><thead><tr><th>Source</th><th>Behaviour</th><th class="num">Flows</th><th class="num">Ports</th><th class="num">Failed</th><th class="num">Risk</th></tr></thead><tbody>
         ${d.graph.sources.slice(0, 10).map((s) => `<tr><td class="mono">${esc(s.ip)}</td><td>${s.behaviour === "normal" ? "normal" : `<span class="tag attack">${s.behaviour}</span>`}</td><td class="num">${s.flows}</td><td class="num">${s.distinct_ports}</td><td class="num">${pct(s.failed_share)}</td><td class="num">${s.source_risk}</td></tr>`).join("")}</tbody></table></div></div>
+    <div class="cols" style="margin-top:16px">
+      <div class="panel"><h3>Activity over time</h3><p class="note">One row per source; each cell is ${d.timeline.bucket_seconds} s, darker means more flows, colour is the highest risk in that cell.</p>${timelineSvg(d.timeline)}</div>
+      <div class="panel"><h3>Block list</h3>${d.blocklist.sources.length ? `<p class="note">Firewall rules for the ${d.blocklist.sources.length} source(s) that behaved like a scanner or flooder. Review before applying: they drop all traffic from each source.</p>
+        <pre class="code">${esc(d.blocklist.iptables)}</pre><div class="form-foot"><button class="btn" id="bl-ipt">Download iptables rules</button><button class="btn" id="bl-nft">Download nftables rules</button></div>` : `<p class="muted" style="margin-top:8px">No source behaved like a scanner or flooder, so there is nothing to block.</p>`}</div></div>
+    ${d.logged ? "" : `<p class="note warn" style="margin-top:12px">This capture was scored but not written to the log, because you are not signed in.</p>`}
     <div class="panel" style="margin-top:16px"><h3 style="margin-bottom:10px">Connections</h3><div id="cap-table"></div>
       <p class="note">Select a row to open that connection in Analyze. Session-content features (failed logins, root shell) cannot be read from packets and are set to 0.</p></div>`;
   const rows = d.rows.map((r) => ({ ...r, dest: `${r.dst}:${r.dport}`, verdict_label: VERDICT[r.verdict] }));
@@ -319,6 +364,7 @@ function renderCapture(d) {
     { key: "verdict_label", label: "Verdict", render: (r) => `<span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span>` }, { key: "risk", label: "Risk", num: 1 },
     ...(rows.some((r) => r.priority != null) ? [{ key: "priority", label: "Priority", num: 1 }] : [])], rows, { onRow: (r) => openFlow(r.flow) });
   [...d.rows].reverse().slice(-60).forEach((r) => trace({ verdict: r.verdict, risk_score: r.risk }));
+  if ($("#bl-ipt")) { $("#bl-ipt").onclick = () => download("zerowatch-block.iptables.sh", d.blocklist.iptables); $("#bl-nft").onclick = () => download("zerowatch-block.nft.sh", d.blocklist.nftables); }
 }
 async function runCapture(promise) {
   $("#cap-out").innerHTML = `<div class="panel"><div class="empty"><b>Rebuilding connections...</b></div></div>`;
@@ -360,14 +406,15 @@ $("#asset-form").onsubmit = async (e) => {
 
 // ---------- hunt ----------
 let lastRetrain = null;
-async function loadHunt() {
+function loadHunt() { return guarded("#hunt-out", loadHuntInner); }
+async function loadHuntInner() {
   if (!$("#hunt-out").children.length) skeleton("#hunt-out");
-  const d = await api("/campaigns").catch((e) => ({ error: e }));
-  if (d.error) { $("#hunt-out").innerHTML = `<div class="error-box"><b>Campaigns are unavailable.</b> ${esc(d.error.data.detail || d.error.message)}</div>`; return; }
+  const d = await api("/campaigns");
   const labelled = d.labelled.attack + d.labelled.benign;
-  $("#hunt-steps").innerHTML = [[d.suspects, "distinct possible zero-days in the log", d.suspects > 0], [d.campaigns.length, "campaigns found", d.campaigns.length > 0], [labelled, "flows labelled by an analyst", labelled > 0], [lastRetrain && lastRetrain.promoted ? "Promoted" : lastRetrain ? "Rejected" : "None yet", "last challenger", lastRetrain && lastRetrain.promoted]]
+  const inShadow = lastRetrain && lastRetrain.mode === "shadow" && lastRetrain.champion && !lastRetrain.promoted;
+  $("#hunt-steps").innerHTML = [[d.suspects, "distinct possible zero-days in the log", d.suspects > 0], [d.campaigns.length, "campaigns found", d.campaigns.length > 0], [labelled, "flows labelled by an analyst", labelled > 0], [lastRetrain && lastRetrain.promoted ? "Promoted" : inShadow ? "In shadow" : lastRetrain ? "Rejected" : "None yet", "last challenger", lastRetrain && lastRetrain.promoted]]
     .map(([v, l, done]) => `<div class="${done ? "done" : ""}"><b>${v}</b>${l}</div>`).join("");
-  const report = lastRetrain ? `<div class="report ${lastRetrain.promoted ? "good" : ""}"><h3>${lastRetrain.promoted ? "Challenger promoted. The live model has learned these flows." : "Challenger not promoted"}</h3>
+  const report = lastRetrain ? `<div class="report ${lastRetrain.promoted ? "good" : ""}"><h3>${lastRetrain.promoted ? "Challenger promoted. The live model has learned these flows." : inShadow ? "Challenger passed its checks and is running in shadow" : "Challenger not promoted"}</h3>
       <p style="margin-top:6px">${esc(lastRetrain.reason)}</p>
       ${lastRetrain.champion ? `<table style="margin-top:10px;max-width:640px"><thead><tr><th></th><th class="num">Held-back labelled flows correct</th><th class="num">Validation F1</th></tr></thead><tbody>
         <tr><td>Champion (previous model)</td><td class="num">${pct(lastRetrain.champion.labelled_holdout_accuracy)}</td><td class="num">${lastRetrain.champion.validation_f1.toFixed(4)}</td></tr>
@@ -380,7 +427,15 @@ async function loadHunt() {
       <tr class="${st.active === 0 ? "best" : ""}"><td>Shipped model${st.active === 0 ? " (live)" : ""}</td><td>at build time</td><td class="num"></td><td class="num"></td><td class="num"></td><td>${st.active === 0 ? "" : '<button class="btn" data-roll="0">Roll back to this</button>'}</td></tr>
       ${st.versions.map((v) => `<tr class="${st.active === v.generation ? "best" : ""}"><td>Learned ${v.generation}${st.active === v.generation ? " (live)" : ""}</td><td class="mono">${new Date(v.promoted_at * 1000).toISOString().slice(0, 16).replace("T", " ")}</td><td class="num">${v.report.labelled}</td><td class="num">${pct(v.report.challenger.labelled_holdout_accuracy)}</td><td class="num">${v.report.challenger.validation_f1.toFixed(4)}</td><td>${st.active === v.generation ? "" : `<button class="btn" data-roll="${v.generation}">Make live</button>`}</td></tr>`).join("")}</tbody></table>
       <p class="note">Promoted models are saved to disk with their hash, so they survive a restart.</p></div>` : "";
-  const retrainBar = `<div class="panel"><div class="form-foot" style="margin-top:0"><span id="retrain-slot"><button class="btn primary" id="retrain" ${labelled < 10 ? "disabled" : ""}>Retrain with ${labelled} labelled flows</button></span>
+  const sh = await api("/learning/shadow").catch(() => ({ active: false }));
+  const shadow = sh.active ? `<div class="report"><h3>A challenger is running in shadow</h3>
+      <p style="margin-top:6px">It scores the same traffic as the live model, but only its disagreements are counted. Run the live replay to give it traffic.</p>
+      <div class="stats" style="margin:12px 0 0"><div class="stat"><b>${sh.stats.flows.toLocaleString()}</b><span>flows scored by both</span></div><div class="stat"><b>${sh.stats.flows ? pct(sh.stats.agree / sh.stats.flows) : "n/a"}</b><span>same decision</span></div>
+        <div class="stat"><b>${sh.stats.only_shadow_flags}</b><span>only the challenger flags: ${sh.stats.only_shadow_flags_true_attack} real attacks, ${sh.stats.only_shadow_flags_true_normal} normal</span></div>
+        <div class="stat"><b>${sh.stats.only_live_flags}</b><span>only the live model flags: ${sh.stats.only_live_flags_true_attack} real attacks, ${sh.stats.only_live_flags_true_normal} normal</span></div></div>
+      <p class="note">True labels are known only for replayed traffic. Promote when the challenger's extra flags are mostly real attacks.</p>
+      <div class="form-foot"><button class="btn primary" id="shadow-promote">Promote the challenger</button><button class="btn" id="shadow-discard">Discard it</button></div></div>` : "";
+  const retrainBar = shadow + `<div class="panel"><div class="form-foot" style="margin-top:0"><span id="retrain-slot"><button class="btn primary" id="retrain" ${labelled < 10 ? "disabled" : ""}>Retrain with ${labelled} labelled flows</button> <button class="btn" id="retrain-shadow" ${labelled < 10 || sh.active ? "disabled" : ""}>Retrain and run in shadow first</button></span>
       <span class="muted">${labelled < 10 ? "Label at least 10 flows to enable retraining." : "Trains a challenger with the same settings as the live model. Takes 10 to 20 seconds."}</span></div></div>`;
   const cards = d.campaigns.map((c, i) => {
     const truth = Object.entries(c.true_labels), mixed = truth.some(([k]) => k === "normal");
@@ -389,7 +444,7 @@ async function loadHunt() {
       <div class="rule">${esc(c.signature.rule)}</div>
       <p style="font-size:.88rem">This generated rule matches ${pct(c.signature.coverage)} of the campaign and ${pct(c.signature.false_match_rate)} of normal training traffic. Mean risk ${c.mean_risk}.</p>
       ${truth.length ? `<p class="note ${mixed ? "warn" : ""}">True labels, known only because this is a labelled replay: ${truth.map(([k, v]) => `${esc(k)} ${v}`).join(", ")}.${mixed ? " This group contains normal traffic, so check it before labelling it all as an attack." : ""}</p>` : ""}
-      <div class="chips" style="margin-top:10px"><a class="chip" href="/campaigns/${c.id}/rule" download>Download Sigma rule</a><button class="chip" data-test="${c.id}">Test rule on the log</button><a class="chip" href="/campaigns/${c.id}/report" download>Download incident report</a></div>
+      <div class="chips" style="margin-top:10px"><a class="chip" href="/campaigns/${c.id}/rule" download>Download Sigma rule</a><button class="chip" data-test="${c.id}">Test rule on the log</button><a class="chip" href="/campaigns/${c.id}/stix" download>Download STIX bundle</a><a class="chip" href="/campaigns/${c.id}/report" download>Download incident report</a></div>
       <p class="note" id="test-${c.id}"></p>
       </div><div class="side"><button class="btn primary" data-label="attack" data-id="${c.id}">Label as attack</button><button class="btn" data-label="benign" data-id="${c.id}">Label as benign</button><button class="btn" data-open="${i}">Open an example</button></div></div></div>`;
   }).join("");
@@ -420,13 +475,19 @@ async function loadHunt() {
     // confirm in place instead of a browser dialog
     $("#retrain-slot").innerHTML = `<span class="confirm"><b>Replace the live model if the challenger wins?</b><button class="btn primary" id="retrain-go">Yes, retrain</button><button class="btn" id="retrain-no">Cancel</button></span>`;
     $("#retrain-no").onclick = loadHunt;
-    $("#retrain-go").onclick = runRetrain;
+    $("#retrain-go").onclick = () => runRetrain("promote");
   };
-  async function runRetrain() {
-    const rb = $("#retrain-go");
+  const rs = $("#retrain-shadow");
+  if (rs) rs.onclick = () => runRetrain("shadow", rs);
+  if ($("#shadow-promote")) {
+    $("#shadow-promote").onclick = async () => { const r = await api("/learning/shadow/promote", {}).catch(() => null); if (r) { if (lastRetrain) lastRetrain.promoted = true; toast("Challenger promoted. Live model is now " + r.model_version); $("#foot-version").textContent = "model " + r.model_version; } loadHunt(); };
+    $("#shadow-discard").onclick = async () => { const r = await api("/learning/shadow", undefined, "DELETE").catch(() => null); if (r) { lastRetrain = null; toast("Challenger discarded."); } loadHunt(); };
+  }
+  async function runRetrain(mode, btn) {
+    const rb = btn || $("#retrain-go");
     rb.disabled = true; rb.textContent = "Training the challenger...";
-    lastRetrain = await api("/learning/retrain", {}).catch((e) => ({ promoted: false, reason: (e.data && e.data.detail) || "Retraining failed. Check the service log." }));
-    toast(lastRetrain.promoted ? "Challenger promoted." : "Challenger not promoted.", !lastRetrain.promoted);
+    lastRetrain = await api("/learning/retrain", { mode: mode === "shadow" ? "shadow" : "promote" }).catch((e) => ({ promoted: false, reason: (e.data && e.data.detail) || "Retraining failed. Check the service log." }));
+    toast(lastRetrain.promoted ? "Challenger promoted." : lastRetrain.mode === "shadow" && lastRetrain.champion ? "Challenger is running in shadow." : "Challenger not promoted.", !lastRetrain.promoted && lastRetrain.mode !== "shadow");
     if (lastRetrain.model_version) $("#foot-version").textContent = "model " + lastRetrain.model_version;
     loadHunt();
   }
@@ -434,8 +495,11 @@ async function loadHunt() {
 $("#hunt-refresh").onclick = loadHunt;
 
 // ---------- overview ----------
-async function loadOverview() {
-  skeleton("#overview-out");
+let overviewTimer = null;
+async function loadOverview(quiet) {
+  if (!quiet) skeleton("#overview-out");
+  clearTimeout(overviewTimer);
+  overviewTimer = setTimeout(() => { if (!$("#view-overview").hidden && !document.hidden) loadOverview(true); }, 15000);  // keeps itself current
   const o = await api("/overview").catch(() => null);
   if (!o) { $("#overview-out").innerHTML = `<div class="error-box"><b>The overview could not be loaded.</b> Check that the service is running, then refresh.</div>`; return; }
   const order = ["attack", "zero_day_suspect", "uncertain", "benign"], total = o.flows || 1;
@@ -454,43 +518,71 @@ async function loadOverview() {
         ${o.flows ? `<div class="mix" role="img" aria-label="Verdict mix">${order.map((v) => `<i class="${v}" style="width:${((o.verdicts[v] || 0) / total) * 100}%"></i>`).join("")}</div>
         <div class="legend">${order.map((v) => `<span><i style="background:var(--${TONE[v]})"></i>${VERDICT[v]} ${(o.verdicts[v] || 0).toLocaleString()}</span>`).join("")}</div>
         <p class="note">${o.flows.toLocaleString()} flows in the current log: ${esc(src)}.</p>` : `<div class="empty"><b>Nothing scored yet</b>Start the live replay, analyze the sample capture, or score a flow.</div>`}
+        ${o.timeline.length > 1 ? `<h3 style="margin:18px 0 0">Verdicts per minute</h3>${minuteChart(o.timeline)}` : ""}
         <h3 style="margin:18px 0 6px">Highest-priority open alerts</h3>
         ${o.top_alerts.length ? `<div class="table-wrap"><table><thead><tr><th>Connection</th><th>Verdict</th><th class="num">Risk</th><th class="num">Priority</th><th>State</th></tr></thead><tbody>${o.top_alerts.map((a, i) => `<tr class="click" data-alert="${i}" tabindex="0"><td class="mono">${esc(a.connection)}</td><td><span class="tag ${a.verdict}">${VERDICT[a.verdict]}</span></td><td class="num">${a.risk_score}</td><td class="num">${a.priority}</td><td>${a.state}</td></tr>`).join("")}</tbody></table></div>` : `<p class="muted">The queue is empty.</p>`}</div>
       <div class="panel"><h3 style="margin-bottom:12px">Health checks</h3><ul class="checks">
         ${check(o.chain.valid ? "" : "bad", o.chain.valid ? "Prediction and action logs pass their hash-chain check." : "A log failed its hash-chain check. Treat it as tampered.", "monitor", "Details")}
         ${check(o.drift === "drift" ? "bad" : o.drift === "warn" ? "warn" : "", { ok: "Real traffic matches the training data.", warn: "Real traffic is starting to move away from the training data.", drift: "Real traffic has drifted from the training data. Retrain.", waiting: "Drift needs 30 real predictions (replay and sample traffic do not count)." }[o.drift], "monitor", "Drift")}
         ${check(o.open_mode ? "warn" : "", o.open_mode ? "Open mode: no API keys are set, so anyone can label and retrain." : "Labelling and retraining require an API key.", null)}
+        ${o.shadow ? check("warn", "A challenger model is running in shadow and waiting for a decision.", "hunt", "Hunt") : ""}
         ${check(o.labelled.attack + o.labelled.benign >= 10 ? "warn" : "", `${o.labelled.attack + o.labelled.benign} flows are labelled and waiting for a retrain.`, "hunt", "Hunt")}
         ${check(o.assets.some((a) => a.exposure >= 60) ? "bad" : o.assets.length ? "" : "warn", o.assets.length ? o.assets.map((a) => `${esc(a.name)} exposure ${a.exposure}`).join(", ") + "." : "No assets registered, so alerts have no priority context.", "assets", "Assets")}
       </ul>
       <h3 style="margin:18px 0 8px">Start here</h3><div class="chips"><button class="chip" data-go="live">Replay labelled traffic</button><button class="chip" data-go="capture">Analyze a capture</button><button class="chip" data-go="analyze">Score one flow</button></div></div>
     </div>`;
   document.querySelectorAll("#overview-out [data-go]").forEach((b) => (b.onclick = () => show(b.dataset.go)));
-  document.querySelectorAll("#overview-out [data-alert]").forEach((tr) => { tr.onclick = () => openFlow(o.top_alerts[tr.dataset.alert].input); tr.onkeydown = (e) => { if (e.key === "Enter") tr.onclick(); }; });
+  document.querySelectorAll("#overview-out [data-alert]").forEach((tr) => { tr.onclick = () => openAlert(o.top_alerts[tr.dataset.alert].request_id); tr.onkeydown = (e) => { if (e.key === "Enter") tr.onclick(); }; });
 }
-$("#overview-refresh").onclick = loadOverview;
+$("#overview-refresh").onclick = () => loadOverview();
+function minuteChart(tl) {
+  const order = ["benign", "uncertain", "zero_day_suspect", "attack"], W = 640, H = 120, bw = Math.min(28, (W - 30) / tl.length), peak = Math.max(1, ...tl.map((m) => order.reduce((a, k) => a + m[k], 0)));
+  return `<svg class="tl" viewBox="0 0 ${W} ${H + 18}" role="img" aria-label="Flows per minute, stacked by verdict">${tl.map((m, i) => { let y = H; return order.map((k) => { const h = (m[k] / peak) * (H - 6); y -= h; return h ? `<rect x="${30 + i * bw}" y="${y}" width="${bw - 3}" height="${h}" fill="var(--${TONE[k]})"><title>${m.minute} ${VERDICT[k]}: ${m[k]}</title></rect>` : ""; }).join(""); }).join("")}
+    <text x="26" y="10" text-anchor="end">${peak}</text><text x="26" y="${H}" text-anchor="end">0</text><text x="30" y="${H + 14}">${tl[0].minute}</text><text x="${30 + tl.length * bw}" y="${H + 14}" text-anchor="end">${tl[tl.length - 1].minute} UTC</text></svg>`;
+}
 
 // ---------- alert queue ----------
-let queueState = "open";
-async function loadQueue() {
+let queueState = "open", queueMine = false;
+function loadQueue() { return guarded("#queue-out", loadQueueInner); }
+async function loadQueueInner() {
   skeleton("#queue-out");
-  const d = await api(`/alerts?state=${queueState}&limit=500`).catch(() => null);
-  if (!d) { $("#queue-out").innerHTML = `<div class="error-box"><b>The queue could not be loaded.</b></div>`; return; }
+  const d = await api(`/alerts?state=${queueState}&limit=500`);
+  if (queueMine) d.items = d.items.filter((a) => a.assignee === me.user);
   const names = { open: "Open", new: "New", investigating: "Investigating", confirmed: "Confirmed", false_positive: "False alarms", all: "All" };
   const n = { ...d.counts, open: d.counts.new + d.counts.investigating, all: Object.values(d.counts).reduce((a, b) => a + b, 0) };
-  $("#queue-filter").innerHTML = Object.keys(names).map((k) => `<button class="chip ${k === queueState ? "on" : ""}" data-qs="${k}">${names[k]} ${n[k]}</button>`).join("");
+  $("#queue-filter").innerHTML = Object.keys(names).map((k) => `<button class="chip ${k === queueState ? "on" : ""}" data-qs="${k}">${names[k]} ${n[k]}</button>`).join("") + `<button class="chip ${queueMine ? "on" : ""}" id="q-mine">Assigned to me</button>`;
   document.querySelectorAll("[data-qs]").forEach((b) => (b.onclick = () => { queueState = b.dataset.qs; loadQueue(); }));
+  $("#q-mine").onclick = () => { queueMine = !queueMine; loadQueue(); };
   if (!d.items.length) { $("#queue-out").innerHTML = `<div class="panel"><div class="empty"><b>Nothing in this view</b>${queueState === "open" ? "Every alert has been triaged, or no traffic has been flagged yet." : "No alerts have this state."}</div></div>`; return; }
-  $("#queue-out").innerHTML = `<div class="panel"><div id="queue-table"></div><p class="note">Priority is the model's risk scaled by the exposure of the asset under attack. Select a row to open the flow in Analyze.</p></div>`;
+  $("#queue-out").innerHTML = `<div class="panel"><div class="form-foot" style="margin:0 0 12px"><span class="muted" id="q-count">Tick alerts to change several at once.</span>
+      <select class="inline" id="q-bulk" aria-label="Set the state of the ticked alerts"><option value="">Set ticked alerts to...</option>${["investigating", "confirmed", "false_positive", "new"].map((s) => `<option value="${s}">${s.replace("_", " ")}</option>`).join("")}</select>
+      <button class="btn" id="q-take">Assign ticked to me</button></div>
+    <div id="queue-table"></div><p class="note">Priority is the model's risk scaled by the exposure of the asset under attack. Select a row to open the flow in Analyze.</p></div>`;
+  const ticked = new Set();
+  const patch = (id, body) => api("/alerts/" + id, body, "PATCH").catch(() => null);
+  const byId = Object.fromEntries(d.items.map((a) => [a.request_id, a]));
+  $("#q-bulk").onchange = async (e) => {
+    const state = e.target.value; if (!state || !ticked.size) { e.target.value = ""; return; }
+    const done = await Promise.all([...ticked].map((id) => patch(id, { state, assignee: byId[id].assignee || "" })));
+    toast(`${done.filter(Boolean).length} alerts set to ${state.replace("_", " ")}.`); loadQueue();
+  };
+  $("#q-take").onclick = async () => {
+    if (!ticked.size) return;
+    const done = await Promise.all([...ticked].map((id) => patch(id, { state: byId[id].state === "new" ? "investigating" : byId[id].state, assignee: me.user })));
+    toast(`${done.filter(Boolean).length} alerts assigned to ${me.user}.`); loadQueue();
+  };
   const rows = d.items.map((a) => ({ ...a, time: a.ts.slice(11, 19), verdict_label: VERDICT[a.verdict] }));
-  dataTable("#queue-table", [{ key: "time", label: "Time (UTC)", mono: 1 }, { key: "connection", label: "Connection", mono: 1 }, { key: "source", label: "Source" },
+  dataTable("#queue-table", [{ key: "request_id", label: "", render: (r) => `<input type="checkbox" data-tick="${r.request_id}" aria-label="Select alert ${r.request_id}" ${ticked.has(r.request_id) ? "checked" : ""}>` }, { key: "time", label: "Time (UTC)", mono: 1 }, { key: "connection", label: "Connection", mono: 1 }, { key: "source", label: "Source" },
     { key: "verdict_label", label: "Verdict", render: (r) => `<span class="tag ${r.verdict}">${VERDICT[r.verdict]}</span>` }, { key: "risk_score", label: "Risk", num: 1 }, { key: "priority", label: "Priority", num: 1 },
-    { key: "state", label: "State", render: (r) => `<select class="inline" data-rid="${r.request_id}" aria-label="State of alert ${r.request_id}">${["new", "investigating", "confirmed", "false_positive"].map((s) => `<option value="${s}" ${s === r.state ? "selected" : ""}>${s.replace("_", " ")}</option>`).join("")}</select>` }],
-    rows, { pageSize: 20, onRow: (r) => openFlow(r.input), after: (el) => el.querySelectorAll("select[data-rid]").forEach((s) => (s.onchange = async () => {
-      const r = await api("/alerts/" + s.dataset.rid, { state: s.value, assignee: "" }, "PATCH").catch(() => null);
+    { key: "state", label: "State", render: (r) => `<select class="inline" data-rid="${r.request_id}" aria-label="State of alert ${r.request_id}">${["new", "investigating", "confirmed", "false_positive"].map((s) => `<option value="${s}" ${s === r.state ? "selected" : ""}>${s.replace("_", " ")}</option>`).join("")}</select>` },
+    { key: "assignee", label: "Assignee", render: (r) => `<input class="inline" data-as="${r.request_id}" value="${esc(r.assignee)}" maxlength="40" placeholder="unassigned" aria-label="Assignee of alert ${r.request_id}">` }],
+    rows, { pageSize: 20, onRow: (r) => openAlert(r.request_id), after: (el) => { el.querySelectorAll("[data-tick]").forEach((c) => (c.onchange = () => { c.checked ? ticked.add(c.dataset.tick) : ticked.delete(c.dataset.tick); $("#q-count").textContent = ticked.size ? ticked.size + " ticked." : "Tick alerts to change several at once."; }));
+      el.querySelectorAll("[data-as]").forEach((inp) => (inp.onchange = async () => { const r = await patch(inp.dataset.as, { state: byId[inp.dataset.as].state, assignee: inp.value.trim() }); if (r) { byId[inp.dataset.as].assignee = r.assignee; toast(r.assignee ? "Assigned to " + r.assignee + "." : "Assignee cleared."); } }));
+      el.querySelectorAll("select[data-rid]").forEach((s) => (s.onchange = async () => {
+      const r = await api("/alerts/" + s.dataset.rid, { state: s.value, assignee: byId[s.dataset.rid].assignee || "" }, "PATCH").catch(() => null);
       if (r) toast(s.value === "confirmed" ? "Confirmed. The flow is labelled as an attack for the next retrain." : s.value === "false_positive" ? "Closed as a false alarm. The flow is labelled benign for the next retrain." : "Alert updated.");
       loadQueue();
-    })) });
+    })); } });
 }
 
 // ---------- batch ----------
@@ -571,6 +663,19 @@ async function loadModel() {
     </div>
     ${m.experiments.length ? `<div class="panel table-wrap" style="margin-top:16px"><h3 style="margin-bottom:10px">Experiments tracked in MLflow</h3><table><thead><tr><th>Run</th><th>Algorithm</th><th>Hyperparameters</th><th class="num">Val F1</th><th class="num">Test acc.</th><th class="num">Test F1</th><th class="num">Ensemble F1</th><th class="num">Zero-day recall</th></tr></thead><tbody>
       ${m.experiments.map((e) => `<tr class="${e.promoted ? "best" : ""}"><td class="mono">${esc(e.run)}${e.promoted ? " (deployed)" : ""}</td><td>${esc(e.algorithm)}</td><td class="mono">${esc(e.hyperparameters)}</td><td class="num">${e.val_f1.toFixed(4)}</td><td class="num">${e.test_accuracy.toFixed(4)}</td><td class="num">${e.test_f1.toFixed(4)}</td><td class="num">${e.ensemble_test_f1.toFixed(4)}</td><td class="num">${pct(e.zero_day_recall_ensemble)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${m.evaluation ? (() => { const c = m.evaluation.confusion, fr = Object.entries(m.evaluation.family_recall), roc = m.evaluation.roc, P = (pt) => `${30 + pt.fpr * 250},${260 - pt.tpr * 250}`;
+      return `<div class="cols" style="margin-top:16px">
+        <div class="panel"><h3 style="margin-bottom:8px">What it gets right and wrong</h3><p class="note" style="margin-bottom:8px">Full verdict on ${(c.tp + c.fp + c.fn + c.tn).toLocaleString()} held-out KDDTest+ flows.</p>
+          <table class="matrix"><thead><tr><th></th><th>Flagged</th><th>Passed</th></tr></thead><tbody>
+          <tr><th>Really an attack</th><td class="good">${c.tp.toLocaleString()}<small>caught</small></td><td class="bad">${c.fn.toLocaleString()}<small>missed</small></td></tr>
+          <tr><th>Really normal</th><td class="bad">${c.fp.toLocaleString()}<small>false alarms</small></td><td class="good">${c.tn.toLocaleString()}<small>correctly passed</small></td></tr></tbody></table></div>
+        <div class="panel"><h3 style="margin-bottom:12px">Attacks caught, by family</h3><div class="pair">${fr.map(([k, v]) => `<div class="row hi" title="${v.flows} flows; classifier alone ${pct(v.caught_by_classifier)}"><span>${k} <span class="muted">${v.flows.toLocaleString()}</span></span><div class="bar"><b style="width:${v.caught * 100}%"></b></div><span>${pct(v.caught)}</span></div>`).join("")}</div>
+          <p class="note">R2L attacks (password guessing and similar) look like normal flows in these features, which is why most are missed.</p></div>
+        <div class="panel"><h3 style="margin-bottom:8px">ROC curve, classifier alone</h3><svg class="roc" viewBox="0 0 300 290" role="img" aria-label="ROC curve, area ${t.test.roc_auc}">
+          <rect x="30" y="10" width="250" height="250" fill="none" stroke="var(--line)"/><line x1="30" y1="260" x2="280" y2="10" stroke="var(--line)" stroke-dasharray="4 4"/>
+          <polyline fill="none" stroke="var(--accent)" stroke-width="2.5" points="${roc.map(P).join(" ")}"/>
+          <text x="155" y="282" text-anchor="middle">false alarms on normal traffic</text><text x="12" y="135" text-anchor="middle" transform="rotate(-90 12 135)">attacks caught</text>
+          <text x="270" y="250" text-anchor="end">area ${t.test.roc_auc.toFixed(3)}</text></svg></div></div>`; })() : ""}
     ${m.threshold_curve.length ? `<div class="panel" style="margin-top:16px"><h3>Decision threshold</h3>
       <p class="muted" style="margin:6px 0 12px;font-size:.88rem;max-width:80ch">A flow is called a known attack when its attack probability reaches this value. Lower it to catch more attacks at the cost of more false alarms. Figures are for the full verdict on held-out KDDTest+.</p>
       <input class="slider" id="thr" type="range" min="0.05" max="0.95" step="0.05" value="${m.threshold}" aria-label="Decision threshold">
@@ -608,7 +713,7 @@ function wireThreshold(m) {
 // ---------- monitoring ----------
 async function loadMonitor() {
   if (!$("#monitor-out").children.length) skeleton("#monitor-out");
-  const [d, r, a, b, al, ac] = await Promise.all([api("/monitoring/drift"), api("/monitoring/recent?limit=15"), api("/audit/verify"), api("/brief"), api("/monitoring/alarm"), api("/audit/actions?limit=12")]);
+  const [d, r, a, b, al, ac] = await Promise.all([api("/monitoring/drift"), api("/monitoring/recent?limit=15"), api("/audit/verify"), api("/brief"), api("/monitoring/alarm"), api("/audit/actions?limit=12").catch(() => ({ items: [], locked: true }))]);
   const word = { ok: "No drift", warn: "Early drift", drift: "Drift detected", waiting: "Collecting data" }[d.status];
   const drift = d.enough_data ? `<div class="table-wrap"><table><thead><tr><th>Feature</th><th class="num">Training</th><th class="num">Live</th><th>Shift</th><th>Status</th></tr></thead><tbody>
     ${d.features.slice(0, 12).map((f) => `<tr><td class="mono">${f.feature}</td><td class="num">${f.kind === "num" ? f.train_mean : pct(f.train_top_share)}</td><td class="num">${f.kind === "num" ? f.live_mean : esc(f.live_top) + " " + pct(f.live_top_share)}</td>
@@ -632,7 +737,7 @@ async function loadMonitor() {
       <p class="note">${al.last_check ? "Last check " + new Date(al.last_check * 1000).toISOString().slice(11, 19) + " UTC: drift " + al.drift + ", log " + (al.chain_valid ? "intact" : "broken") + "." : "No check has run yet."}${al.last_sent ? " Last message sent " + new Date(al.last_sent * 1000).toISOString().slice(11, 19) + " UTC." : ""}</p>
       <div class="form-foot"><button class="btn" id="alarm-test">Run the check now and send a test message</button></div></div>
     <div class="panel table-wrap"><h3 style="margin-bottom:10px">Analyst and admin actions</h3>
-      ${ac.items.length ? `<table><thead><tr><th>Time (UTC)</th><th>Role</th><th>Action</th><th>Detail</th></tr></thead><tbody>${ac.items.map((e) => `<tr><td class="mono">${esc(e.ts.slice(11, 19))}</td><td>${esc(e.role)}</td><td class="mono">${esc(e.action)}</td><td class="mono">${esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" "))}</td></tr>`).join("")}</tbody></table><p class="note">This log is hash-chained too, so an action cannot be quietly removed.</p>` : `<p class="muted">No labels, retrains or setting changes yet.</p>`}</div></div>
+      ${ac.items.length ? `<table><thead><tr><th>Time (UTC)</th><th>Role</th><th>Action</th><th>Detail</th></tr></thead><tbody>${ac.items.map((e) => `<tr><td class="mono">${esc(e.ts.slice(11, 19))}</td><td>${esc(e.role)}</td><td class="mono">${esc(e.action)}</td><td class="mono">${esc(Object.entries(e.detail).map(([k, v]) => k + "=" + v).join(" "))}</td></tr>`).join("")}</tbody></table><p class="note">This log is hash-chained too, so an action cannot be quietly removed.</p>` : `<p class="muted">${ac.locked ? "Sign in with an analyst or admin key to see who did what." : "No labels, retrains or setting changes yet."}</p>`}</div></div>
     <div class="panel table-wrap" style="margin-top:16px"><h3 style="margin-bottom:10px">Latest predictions in the log</h3>
       ${r.items.length ? `<table><thead><tr><th>Time (UTC)</th><th>Request</th><th>Connection</th><th>Verdict</th><th class="num">Risk</th></tr></thead><tbody>${r.items.map((e) => `<tr><td class="mono">${esc(e.ts.slice(11, 19))}</td><td class="mono">${esc(e.request_id)}</td><td class="mono">${esc(e.input.protocol_type)}/${esc(e.input.service)} ${esc(e.input.flag)}</td><td><span class="tag ${e.output.verdict}">${VERDICT[e.output.verdict]}</span></td><td class="num">${e.output.risk_score}</td></tr>`).join("")}</tbody></table>`
       : `<p class="muted">Nothing scored since the service started.</p>`}</div>`;
@@ -660,9 +765,29 @@ $("#monitor-refresh").onclick = loadMonitor;
     $("#foot-version").textContent = "model " + h.model_version;
     contract = await api("/contract");
     buildForm();
-    refreshAuth();
+    await refreshAuth();
     show(location.hash.slice(1) || "analyze", "boot");
+    const recent = await api("/monitoring/recent?limit=120").catch(() => null);  // history in the trace from the first paint
+    if (recent) recent.items.reverse().forEach((e) => trace(e.output));
   } catch (e) {
     $("#health").innerHTML = `<i class="dot bad"></i>API unreachable`;
   }
 })();
+
+// ---------- keyboard ----------
+const tabs = [...document.querySelectorAll(".tabs button")];
+$(".tabs").addEventListener("keydown", (e) => {  // arrow keys move between tabs, as the tab pattern expects
+  const i = tabs.indexOf(document.activeElement); if (i < 0) return;
+  const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (to === undefined) return;
+  e.preventDefault(); const t = tabs[(to + tabs.length) % tabs.length]; show(t.dataset.view, false, true); t.focus();
+});
+const KEYS = "Keys: 1 to 9 and 0 open a view, left and right arrows move between tabs, / jumps to the table filter, T switches theme.";
+$("#keys-help").onclick = () => toast(KEYS);
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, select, textarea") || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (/^[0-9]$/.test(e.key)) { const t = tabs[e.key === "0" ? 9 : Number(e.key) - 1]; if (t) { show(t.dataset.view, false, true); t.focus(); } }
+  else if (e.key === "/") { const f = document.querySelector("main > section:not([hidden]) input[type=search]"); if (f) { e.preventDefault(); f.focus(); } }
+  else if (e.key === "t" || e.key === "T") $("#theme").click();
+  else if (e.key === "?") toast(KEYS);
+});
