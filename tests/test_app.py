@@ -356,7 +356,7 @@ def test_roles_gate_every_state_changing_route(monkeypatch):
     monkeypatch.setattr(service, "ANALYST_TOKEN", "analyst-secret")
     a, adm = {"x-api-key": "analyst-secret"}, {"x-api-key": "admin-secret"}
     assert client.post("/predict", json=NORMAL).status_code == 200  # scoring stays open
-    assert client.get("/auth/whoami").json() == {"role": "viewer", "open_mode": False}
+    assert client.get("/auth/whoami").json() == {"role": "viewer", "user": "anonymous", "open_mode": False}
     for method, path, body in [("post", "/learning/retrain", None), ("post", "/learning/rollback", {"generation": 0}),
                                ("post", "/settings/threshold", {"threshold": 0.5}), ("post", "/monitoring/alarm/test", None),
                                ("post", "/assets", {"name": "x", "url": "https://example.org", "services": ["http"]}),
@@ -368,7 +368,8 @@ def test_roles_gate_every_state_changing_route(monkeypatch):
     assert client.post("/feedback", json=fb).status_code == 401
     assert client.post("/feedback", json=fb, headers=a).status_code == 200
     assert client.post("/learning/rollback", json={"generation": 0}, headers=adm).status_code == 200
-    actions = [e["action"] for e in client.get("/audit/actions").json()["items"]]
+    assert client.get("/audit/actions").status_code == 401  # the action log itself is not public
+    actions = [e["action"] for e in client.get("/audit/actions", headers=a).json()["items"]]
     assert "rollback" in actions and "feedback" in actions
 
 
@@ -566,3 +567,208 @@ def test_pcapng_and_ipv6_are_parsed():
     assert [(p["src"], p["dport"], p["flags"]) for p in pkts] == [("2001:db8::1", 443, 0x02), ("2001:db8::2", 40000, 0x12)]
     flows = pcap_flows.to_flows(pcap_flows.connections(pkts))
     assert len(flows) == 1 and flows[0]["flow"]["service"] == "http_443" and flows[0]["flow"]["flag"] == "S1"
+
+
+# ---- round 3: speed, label hygiene, read access, shadow mode, imports and exports ----
+def _unseen_labels(n=40):
+    return [{"input": s["flow"], "label": "attack"} for s in service.SAMPLES["flows"]
+            if s["label"] != "normal" and not s["seen_in_training"]][:n]
+
+
+def test_bulk_scoring_is_vectorised():
+    import time
+
+    from pcap_flows import write_pcap
+    t = time.time()
+    assert client.post("/predict/batch", json={"flows": [NORMAL] * 500}).json()["count"] == 500
+    assert time.time() - t < 3, "500 flows used to take 10 s"
+    flood = write_pcap([(i * 0.001, "10.0.0.99", "10.0.0.10", "tcp", 1024 + i, 80, 0x02, 0) for i in range(3000)])
+    t = time.time()
+    r = client.post("/capture", content=flood, headers={"content-type": "application/octet-stream"}).json()
+    assert r["flows"] == 3000 and time.time() - t < 10, "3,000 connections used to take 40 s"
+
+
+def test_one_label_per_flow_and_reopening_withdraws_it():
+    service.LABEL_FILE.write_text("")
+    rid = client.post("/predict", json=SYN_FLOOD | {"count": 333}).json()["request_id"]
+    client.post("/feedback", json={"request_id": rid, "correct": False})
+    client.post("/feedback", json={"request_id": rid, "correct": False})
+    client.patch(f"/alerts/{rid}", json={"state": "confirmed"})
+    mine = [r for r in service._read_labelled() if r["input"]["count"] == 333]
+    assert [r["label"] for r in mine] == ["attack"], "the newest decision wins and there is exactly one label"
+    client.patch(f"/alerts/{rid}", json={"state": "investigating"})
+    assert not [r for r in service._read_labelled() if r["input"]["count"] == 333]
+    service.LABEL_FILE.write_text("")
+
+
+def test_keyless_visitor_cannot_read_or_fill_the_logs(monkeypatch):
+    monkeypatch.setattr(service, "ADMIN_TOKEN", "admin-secret")
+    monkeypatch.setattr(service, "ANALYST_TOKEN", "analyst-secret")
+    a = {"x-api-key": "analyst-secret"}
+    for path in ("/audit/actions", "/alerts", "/campaigns", "/alerts/abc"):
+        assert client.get(path).status_code == 401, path
+    assert client.post("/copilot", json={"question": "what happened?"}).status_code == 401
+    assert client.post("/capture", content=b"x" * 64, headers={"content-type": "application/octet-stream"}).status_code == 401
+    before = len(service.read_log(10**6))
+    r = client.get("/simulate?n=30").json()
+    assert len(r["events"]) == 30 and r["logged"] is False
+    assert client.get("/capture/sample").json()["logged"] is False
+    assert len(service.read_log(10**6)) == before, "an anonymous visitor must not be able to grow the log"
+    assert client.get("/simulate?n=5", headers=a).json()["logged"] is True
+    assert client.get("/alerts", headers=a).status_code == 200
+
+
+def test_security_headers_and_no_inline_script():
+    r = client.get("/")
+    csp = r.headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp and "unsafe-eval" not in csp
+    assert "<script>" not in r.text, "inline scripts would be blocked by the policy"
+    assert "content-security-policy" not in client.get("/docs").headers  # Swagger UI needs its CDN
+    assert client.get("/health").headers["cache-control"] == "no-store"
+    assert client.get("/favicon.ico").status_code == 200 and client.get("/static/theme.js").status_code == 200
+
+
+def test_alert_list_is_compact_and_detail_carries_the_flow():
+    rid = client.post("/predict", json=SYN_FLOOD | {"count": 444}).json()["request_id"]
+    items = client.get("/alerts?state=all&limit=500").json()["items"]
+    assert items and all("input" not in a for a in items)
+    assert client.get(f"/alerts/{rid}").json()["input"]["count"] == 444
+    assert client.get("/alerts/missing").status_code == 404
+
+
+def test_sigma_rule_groups_repeated_exclusions():
+    from ops import sigma_rule
+    y = sigma_rule("abc", [{"field": "rerror_rate", "op": ">", "value": 0.38}, {"field": "service", "op": "!=", "value": "smtp"},
+                           {"field": "service", "op": "!=", "value": "ftp_data"}], 20, 0.01)
+    block = y.split("    filter:\n")[1].split("    condition")[0]
+    keys = [ln.strip().split(":")[0] for ln in block.splitlines() if ln.startswith("        ") and not ln.strip().startswith("-")]
+    assert keys == ["service"] and "- smtp" in block and "- ftp_data" in block
+    assert "rerror_rate|gt: 0.38" in y and "condition: selection and not filter" in y
+
+
+def test_shadow_mode_counts_disagreements_before_promotion():
+    service.LABEL_FILE.write_text("".join(json.dumps(r) + "\n" for r in _unseen_labels()))
+    try:
+        report = client.post("/learning/retrain", json={"mode": "shadow"}).json()
+        assert report["promoted"] is False and report["mode"] == "shadow"
+        st = client.get("/learning/shadow").json()
+        if st["active"]:
+            assert "learned" not in client.get("/health").json()["model_version"], "shadow must not change the live model"
+            client.get("/simulate?n=60")
+            stats = client.get("/learning/shadow").json()["stats"]
+            assert stats["flows"] == 60 and stats["agree"] + stats["only_shadow_flags"] + stats["only_live_flags"] == 60
+            assert stats["only_shadow_flags_true_attack"] + stats["only_shadow_flags_true_normal"] == stats["only_shadow_flags"]
+            promoted = client.post("/learning/shadow/promote").json()
+            assert promoted["active"] >= 1 and "learned" in promoted["model_version"]
+            assert client.get("/learning/shadow").json() == {"active": False}
+        assert client.delete("/learning/shadow").status_code == 404
+    finally:
+        service.LABEL_FILE.write_text("")
+        service.SHADOW.update(detector=None, since=None, report=None, stats=None)
+        service.REGISTRY.activate(0)
+
+
+def test_rollback_is_refused_while_retraining():
+    assert service._retrain_lock.acquire(blocking=False)
+    try:
+        assert client.post("/learning/rollback", json={"generation": 0}).status_code == 409
+    finally:
+        service._retrain_lock.release()
+
+
+def test_capture_gives_a_block_list_and_a_timeline():
+    from ops import blocklist
+    body = client.post("/capture", content=_capture(), headers={"content-type": "application/octet-stream"}).json()
+    bl = body["blocklist"]
+    assert {s["ip"] for s in bl["sources"]} == {"10.0.0.66", "10.0.0.99"}
+    assert "iptables -I INPUT -s 10.0.0.66 -j DROP" in bl["iptables"] and "10.0.0.101" not in bl["iptables"]
+    assert "ip saddr { 10.0.0.66, 10.0.0.99 }" in bl["nftables"] or "ip saddr { 10.0.0.99, 10.0.0.66 }" in bl["nftables"]
+    tl = body["timeline"]
+    assert tl["sources"] and all(len(s["buckets"]) == 40 for s in tl["sources"])
+    assert sum(b[0] for s in tl["sources"] for b in s["buckets"]) == body["flows"]
+    evil = blocklist([{"ip": "1.2.3.4; rm -rf /", "behaviour": "scanner", "flows": 9}])
+    assert evil["sources"] == [] and evil["iptables"] == "", "a hostile address must never reach a shell command"
+
+
+def test_zeek_conn_log_import():
+    cols = "ts uid id.orig_h id.orig_p id.resp_h id.resp_p proto service duration orig_bytes resp_bytes conn_state"
+    head = "#separator \\x09\n#fields\t" + "\t".join(cols.split()) + "\n"
+    rows = [f"{1000 + i}.0\tC{i}\t10.0.0.101\t{40000 + i}\t10.0.0.10\t80\ttcp\thttp\t0.5\t300\t2000\tSF" for i in range(5)]
+    rows += [f"{1010 + i * 0.01}\tS{i}\t10.0.0.99\t{1024 + i}\t10.0.0.10\t80\ttcp\t-\t-\t0\t0\tS0" for i in range(80)]
+    r = client.post("/capture", content=(head + "\n".join(rows) + "\n").encode(), headers={"content-type": "application/octet-stream"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["flows"] == 85
+    assert {s["ip"]: s["behaviour"] for s in body["graph"]["sources"]}["10.0.0.99"] == "flooder"
+    web = next(x for x in body["rows"] if x["src"] == "10.0.0.101")
+    assert web["flag"] == "SF" and web["flow"]["src_bytes"] == 300 and web["flow"]["dst_bytes"] == 2000
+    assert client.post("/capture", content=b"#fields\tfoo\tbar\n1\t2\n", headers={"content-type": "application/octet-stream"}).status_code == 422
+
+
+def test_named_users_appear_in_the_action_log(monkeypatch):
+    monkeypatch.setattr(service, "USERS", {"asha-key": ("asha", "analyst"), "ravi-key": ("ravi", "admin")})
+    assert client.get("/auth/whoami", headers={"x-api-key": "asha-key"}).json() == {"role": "analyst", "user": "asha", "open_mode": False}
+    assert client.post("/learning/rollback", json={"generation": 0}, headers={"x-api-key": "asha-key"}).status_code == 403
+    assert client.post("/learning/rollback", json={"generation": 0}, headers={"x-api-key": "ravi-key"}).status_code == 200
+    last = client.get("/audit/actions?limit=1", headers={"x-api-key": "asha-key"}).json()["items"][0]
+    assert (last["user"], last["role"], last["action"]) == ("ravi", "admin", "rollback")
+
+
+def test_scheduled_retrain_only_ever_goes_to_shadow(monkeypatch):
+    monkeypatch.setattr(service, "AUTO_RETRAIN", True)
+    monkeypatch.setattr(service, "AUTO_RETRAIN_MIN_LABELS", 10)
+    monkeypatch.setitem(service._auto, "labels_at_last_run", 0)
+    service.LABEL_FILE.write_text("")
+    assert service.auto_retrain() is None, "nothing to learn from"
+    service.LABEL_FILE.write_text("".join(json.dumps(r) + "\n" for r in _unseen_labels()))
+    try:
+        report = service.auto_retrain()
+        assert report is not None and report["promoted"] is False
+        assert service.LEARNING["generation"] == 0, "an unattended job must not replace the live model"
+        assert service.auto_retrain() is None, "no new labels since the last run"
+        assert service.AUDIT_LOG.read(1)[0]["user"] == "scheduler"
+    finally:
+        service.LABEL_FILE.write_text("")
+        service.SHADOW.update(detector=None, since=None, report=None, stats=None)
+
+
+def test_stix_bundle_for_a_campaign():
+    import random
+    random.seed(7)
+    service.LABEL_FILE.write_text("")
+    for _ in range(10):
+        client.get("/simulate?n=60")
+    found = client.get("/campaigns").json()["campaigns"]
+    assert found
+    b = client.get(f"/campaigns/{found[0]['id']}/stix").json()
+    kinds = [o["type"] for o in b["objects"]]
+    ind = b["objects"][0]
+    assert b["type"] == "bundle" and kinds[0] == "indicator" and ind["pattern_type"] == "sigma" and "detection:" in ind["pattern"]
+    assert all(o["spec_version"] == "2.1" and o["id"].startswith(o["type"] + "--") for o in b["objects"])
+    assert kinds.count("relationship") == kinds.count("attack-pattern")
+
+
+def test_replay_stream_sends_events():
+    with client.stream("GET", "/simulate/stream?n=3&ticks=2&interval=0") as r:
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+        chunks = [ln for ln in r.iter_lines() if ln.startswith("data: ")]
+    assert len(chunks) == 2 and len(json.loads(chunks[0][6:])["events"]) == 3
+    assert client.get("/simulate/stream?ticks=9999").status_code == 422
+
+
+def test_log_reads_span_a_rotation(tmp_path):
+    from store import ChainLog
+    log = ChainLog(tmp_path / "p.jsonl", max_bytes=400)
+    for i in range(30):
+        log.append({"n": i})
+    log.append_many([{"n": 30 + i} for i in range(5)])
+    assert len(list(tmp_path.glob("p-*.jsonl"))) >= 2
+    assert [e["n"] for e in log.read(20)] == list(range(15, 35)), "newest 20, oldest first, across files"
+    assert log.verify()["valid"] is True
+
+
+def test_model_tab_data_is_present():
+    ev = client.get("/model/info").json()["evaluation"]
+    c = ev["confusion"]
+    assert c["tp"] + c["fp"] + c["fn"] + c["tn"] == 21494
+    assert set(ev["family_recall"]) == {"DoS", "Probe", "R2L", "U2R"} and len(ev["roc"]) >= 10

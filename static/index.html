@@ -5,18 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ZeroWatch console</title>
   <meta name="description" content="AI-based zero-day attack detection for network flows">
-  <script>
-    // set the theme before first paint so there is no flash
-    (function () {
-      var t = null;
-      try { t = localStorage.getItem("zw-theme"); } catch (e) {}
-      if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-      document.documentElement.dataset.theme = t;
-    })();
-  </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="/static/theme.js"></script>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -113,7 +103,7 @@
           <h1 style="font-size:1.6rem">Live traffic</h1>
           <p>Replays held-out flows the model never trained on, including 17 attack types that do not exist in the training data. The true label is shown next to each verdict.</p>
         </div>
-        <button class="btn primary" id="live-toggle">Start replay</button>
+        <div class="form-foot" style="margin:0"><button class="btn primary" id="live-toggle">Start replay</button><button class="btn" id="live-reset">Reset counters</button></div>
       </div>
       <div class="stats" id="live-stats"></div>
       <div class="panel table-wrap">
@@ -133,11 +123,11 @@
         </div>
         <div class="form-foot" style="margin:0">
           <button class="btn primary" id="cap-sample">Analyze the sample capture</button>
-          <label class="btn" for="cap-file">Choose a .pcap file</label>
-          <input type="file" id="cap-file" accept=".pcap,.cap" hidden>
+          <label class="btn" for="cap-file">Choose a capture or Zeek log</label>
+          <input type="file" id="cap-file" accept=".pcap,.pcapng,.cap,.log" hidden>
         </div>
       </div>
-      <div id="cap-out"><div class="panel"><div class="empty"><b>No capture analyzed yet</b>Use the sample capture, or choose a classic .pcap file up to 5 MB. Record one with: tcpdump -w traffic.pcap -c 20000</div></div></div>
+      <div id="cap-out"><div class="panel"><div class="empty"><b>No capture analyzed yet</b>Use the sample capture, or choose a .pcap, .pcapng or Zeek conn.log file up to 5 MB. Record one with: tcpdump -w traffic.pcap -c 20000</div></div></div>
     </section>
 
     <!-- Assets -->
@@ -225,6 +215,7 @@
     <a href="/metrics">Prometheus metrics</a>
     <a href="/health">Health</a>
     <span>NSL-KDD, University of New Brunswick</span>
+    <button class="chip" id="keys-help">Keyboard shortcuts</button>
   </footer>
   <script src="/static/app.js"></script>
 </body>
