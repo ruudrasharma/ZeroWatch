@@ -84,6 +84,7 @@ ANALYST_TOKEN = os.getenv("ANALYST_TOKEN", "")
 USERS = {tok: (name, role) for name, role, tok in
          (u.split(":", 2) for u in os.getenv("USERS", "").split(",") if u.count(":") >= 2) if role in ("analyst", "admin")}
 DOCS_ENABLED = os.getenv("DOCS_ENABLED", "1") == "1"
+ON_RENDER = bool(os.getenv("RENDER"))               # Render sets this itself; a public host must never run open
 TRUST_PROXY = os.getenv("TRUST_PROXY", "0") == "1"  # only then is X-Forwarded-For believed
 REAL_SOURCES = {"api", "batch", "capture"}          # replay and the bundled sample are demo traffic
 PRED_LOG = ChainLog(LOG_FILE, int(os.getenv("LOG_MAX_BYTES", "5000000")))
@@ -443,7 +444,7 @@ def client_ip(request: Request) -> str:
 
 def identity(request: Request) -> tuple[str, str]:
     """(role, user) for this request. Keys are compared in constant time."""
-    if not ADMIN_TOKEN and not ANALYST_TOKEN and not USERS:
+    if open_mode():
         return "admin", "open-mode"
     key = request.headers.get("x-api-key", "")
     for tok, (name, role) in USERS.items():
@@ -461,7 +462,9 @@ def role_of(request: Request) -> str:
 
 
 def open_mode() -> bool:
-    return not ADMIN_TOKEN and not ANALYST_TOKEN and not USERS
+    """Open mode is for local development only. On a public host without tokens, everything that
+    changes state stays locked (viewer role) instead of being open to every visitor."""
+    return not ADMIN_TOKEN and not ANALYST_TOKEN and not USERS and not ON_RENDER
 
 
 def require(minimum: str):
@@ -574,7 +577,7 @@ async def guard(request: Request, call_next):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
             "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-    if TRUST_PROXY:  # served over HTTPS behind the platform's proxy
+    if TRUST_PROXY or ON_RENDER:  # served over HTTPS behind the platform's proxy
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if "json" in response.headers.get("content-type", ""):
         response.headers["Cache-Control"] = "no-store"
