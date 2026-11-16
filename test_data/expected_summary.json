@@ -1,0 +1,54 @@
+{
+  "model_version": "hgb-2026-11-15-eb8ce2fc",
+  "batch": {
+    "normal_20": {
+      "benign": 19,
+      "zero_day_suspect": 1
+    },
+    "known_attacks_20": {
+      "uncertain": 4,
+      "attack": 12,
+      "benign": 4
+    },
+    "unseen_attacks_20": {
+      "attack": 12,
+      "zero_day_suspect": 4,
+      "benign": 4
+    }
+  },
+  "sample_pcap": {
+    "benign": 81,
+    "attack": 217,
+    "zero_day_suspect": 9,
+    "uncertain": 3
+  },
+  "sample_pcap_top_sources": [
+    [
+      "10.0.0.66",
+      "scanner"
+    ],
+    [
+      "10.0.0.99",
+      "flooder"
+    ]
+  ],
+  "zeek_sample": {
+    "benign": 50,
+    "zero_day_suspect": 1,
+    "attack": 159
+  },
+  "zeek_sample_top_sources": [
+    [
+      "10.1.0.99",
+      "flooder"
+    ],
+    [
+      "10.1.0.66",
+      "scanner"
+    ],
+    [
+      "10.1.0.10",
+      "normal"
+    ]
+  ]
+}
