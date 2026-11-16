@@ -1,0 +1,13 @@
+id,scenario,what it shows,expected,model_verdict,risk,severity,family
+TC01,Normal web request,Ordinary page load,benign,benign,0,low,
+TC02,Normal DNS lookup,Short UDP query,benign,benign,0,low,
+TC03,SYN flood,Hundreds of unanswered SYNs,attack,attack,100,critical,DoS
+TC04,Port scan,Many rejected connections to different services,attack,attack,100,critical,Probe
+TC05,Password guessing,Failed logins on one service (R2L; known weak spot),attack or weak spot,attack,51,medium,Probe
+TC06,Root shell exploit,Privilege escalation (U2R),attack,attack,97,critical,U2R
+TC07,Unseen apache2 flood,Attack type absent from training,attack or zero_day_suspect,zero_day_suspect,84,high,
+TC08,Unseen mscan sweep,Attack type absent from training,attack or zero_day_suspect,zero_day_suspect,79,high,
+TC09,ICMP flood,Large ICMP burst,attack,attack,100,critical,DoS
+TC10,Teardrop-style fragments,Malformed IP fragments,attack,attack,87,critical,DoS
+TC11,Large upload,"Big benign transfer, to check size alone is not enough",benign or review,uncertain,25,low,
+TC12,Quiet login-heavy session,"Logged in, many sensitive-directory hits",may be missed (flow-level limit),benign,0,low,
